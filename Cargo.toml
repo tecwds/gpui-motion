@@ -1,0 +1,39 @@
+[package]
+name = "gpui-component-motion"
+version = "0.1.0"
+edition = "2024"
+description = "Non-intrusive animation layer for gpui-component"
+license = "MIT"
+readme = "README.md"
+keywords = ["gpui", "animation", "motion", "spring", "ui"]
+categories = ["gui", "graphics"]
+
+[lib]
+name = "gpui_component_motion"
+path = "src/lib.rs"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", features = [
+    "test-support",
+] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+    "font-kit",
+] }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+anyhow = "1.0"
+
+[[example]]
+name = "codex"
+path = "examples/codex.rs"
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"
+
+[[example]]
+name = "story"
+path = "examples/story.rs"
