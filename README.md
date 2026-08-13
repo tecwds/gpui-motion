@@ -220,6 +220,7 @@ EXITING ──定时器到期但 epoch 不匹配──▶ 忽略（无副作用�
 > `MotionLifecycle::new` / `with_exit_spec`）都会剥离 Spring——退场过冲到负值对
 > width / opacity 无意义，且反向 Spring 无法精确回到起始态。若原规格时长未被显式覆盖
 > （仍等于该预设的推荐时长），剥离后自动重置为默认 200ms；显式时长则保留。
+> 剥离逻辑封装为公开方法 `AnimationSpec::without_spring()`，手动构造场景亦可复用。
 > 如需更长的退场动画，直接通过 `with_duration` 定制即可。
 
 ## 已知限制
@@ -235,6 +236,9 @@ EXITING ──定时器到期但 epoch 不匹配──▶ 忽略（无副作用�
   建议将动画应用于包装元素而非直接动画元素本身。
 - **零时长安全**：`duration + delay == 0` 时自动钳制为 1ms 最小动画时长，
   全路径无 NaN / 除零（纯 delay 场景延迟期输出起始态、`t=1` 输出终态）。
+- **`MotionExt` 全局独占**：`MotionExt` 为 blanket impl，下游不可再为具体类型实现该
+  trait，且 `fade_in` / `slide_up` / `with_motion` 等方法名在依赖图中全局抢占——属
+  有意设计（一行接入的代价，详见 `ext.rs` 模块文档）。
 
 ## Examples
 

@@ -15,8 +15,8 @@ Rust edition: **2024**. Crate name: `gpui-component-motion`.
 | Export | Source | Purpose |
 |--------|--------|---------|
 | `MotionExt` | `src/ext.rs` | Blanket impl trait: `fade_in` / `slide_up` / `slide_down` / `slide_left` / `slide_right` / `with_motion` on any `IntoElement + Styled` |
-| `Animated<T>` | `src/animated.rs` | Element wrapper implementing `IntoElement`; handles enter/exit, Spring mapping, initial-state preset |
-| `AnimationSpec` | `src/spec.rs` | Duration + delay + easing + optional Spring; builder methods `with_duration` / `with_delay` / `with_easing` / `with_spring` |
+| `Animated<T>` | `src/animated.rs` | Element wrapper implementing `IntoElement` (and `ParentElement` when `T: ParentElement`); handles enter/exit, Spring mapping, initial-state preset; prebuilds the GPUI `Animation` (per-frame alloc = 1 `Box`, forced by `with_animation` signature) |
+| `AnimationSpec` | `src/spec.rs` | Duration + delay + easing + optional Spring; builder methods `with_duration` / `with_delay` / `with_easing` / `with_spring` / `without_spring` |
 | `Easing` | `src/easing.rs` | Traditional curves: `Linear` / `EaseIn` / `EaseOut` / `EaseInOut` (output ∈ [0,1]) |
 | `SpringPreset` | `src/easing.rs` | Spring physics: `Stiff` / `Default` / `Gentle` / `Wobbly` (output can overshoot >1) |
 | `Motion` | `src/motion.rs` | Preset effects: `Fade` / `SlideUp` / `SlideDown` / `SlideLeft` / `SlideRight` / `ExpandWidth` / `ExpandHeight` |
@@ -71,7 +71,16 @@ inside `Animated<T>` — callers just set `with_spring`.
 > removes the Spring preset — overshooting to negative values is meaningless for
 > width/opacity. If the duration was not explicitly overridden (still equal to the
 > preset's recommended duration), it resets to the default 200ms; explicit durations
-> are kept. There is no public path to a Spring exit.
+> are kept. There is no public path to a Spring exit. The stripping logic lives in the
+> public `AnimationSpec::without_spring()`, so it also works outside the crate's
+> construction paths (e.g. manually building an `Animated` from stored specs).
+
+> **Terminal style override**: at `t=1` `Motion::apply` applies the motion's terminal
+> style, which overrides conflicting existing styles on the element (GPUI `Styled`
+> refinement cannot be removed or read back — framework limitation). Wrap the animated
+> element instead of animating the element that carries the conflicting style.
+> `apply` input clamping (I8): `Fade` / `Expand*` clamp to `[0,1]`, `Slide*` rejects
+> negatives but allows overshoot `>1`.
 
 ### 3. Declarative Presence (enter + exit)
 
@@ -107,7 +116,29 @@ State machine: `HIDDEN → ENTERING → VISIBLE → EXITING → HIDDEN`.
 Each transition increments `epoch` to ensure unique animation `ElementId`s (avoids GPUI
 caching stale `delta=1.0` animation state).
 
-### 4. Motion presets
+- **Transition snapshots (S6)**: `set_present` captures the current enter/exit motion +
+  spec pair into `enter_active` / `exit_active` at the moment of the transition. In-flight
+  transitions are NOT affected by later `set_lifecycle` calls — the new lifecycle only
+  applies to subsequent transitions. `set_lifecycle` with an equal lifecycle short-circuits
+  (no notify, no snapshot touch). Snapshots are cleared on reverse transition or timer
+  completion.
+- **Exit timer grace (S7)**: the unmount timer is `exit_spec.duration + delay + 50ms`
+  (`EXIT_TIMER_GRACE`), covering GPUI's start-timestamp being recorded at first layout
+  (up to one frame late).
+- **Epoch guard (S5)**: the timer callback only acts when `closing` is still true AND the
+  epoch matches the one captured at spawn; stale timers from interrupted exits are silently
+  ignored.
+
+### 4. Attaching children (ParentElement, S12)
+
+`Animated<T>` implements `ParentElement` when `T: ParentElement`, so children attach
+directly (they are applied to the wrapped element before animation starts):
+
+```rust
+div().fade_in("panel").child(div().child("panel content"));
+```
+
+### 5. Motion presets
 
 | Motion | Enter | Exit | Use case |
 |--------|-------|------|----------|
@@ -184,6 +215,23 @@ anonymous `&str` parameters). If a function returns `impl IntoElement` and takes
 from a non-`'static` source, the borrow won't live long enough.
 
 Fix: Take owned `String` instead of `&str` for parameters used to construct element IDs.
+
+## Known Limitations
+
+- **Interruption jump (S8)**: GPUI `Animation` does not support custom start progress, so
+  interrupting exit→enter / enter→exit causes one visible jump (from the current frame
+  position to the new animation's start). No workaround; documented behavior.
+- **Expand reflow cost (S10)**: `ExpandWidth` / `ExpandHeight` change size every frame,
+  triggering taffy subtree reflow and text relayout — avoid on large text subtrees.
+- **Delay redraw cost (S11)**: `delay` is folded into the easing prefix; GPUI's
+  `AnimationElement` requests a frame every tick until `done`, so the delay period still
+  redraws at full rate. Budget for long delays (>300ms).
+- **Zero-duration clamp (S1)**: `duration + delay == 0` is clamped to a minimum 1ms
+  animation (`MIN_ANIMATION_DURATION`); no NaN/div-by-zero path. Pure-delay specs output
+  the start state during the delay period and the terminal state at `t=1`.
+- **Blanket impl exclusivity**: `MotionExt` is a blanket impl — downstream crates cannot
+  implement it for their own types and the method names (`fade_in`, `slide_up`, …) are
+  globally claimed. Intentional design (one-line integration).
 
 ## Examples
 
