@@ -8,14 +8,15 @@
 //! - Progress / Tooltip / Notification
 //! - Motion Composition（Phase 1：颜色插值 / Keyframes / Stagger）
 //! - Loop & SpringValue（Phase 2：循环动效 / 数值弹簧）
+//! - PresenceSet & DragSpring（Phase 3：多子元素进出 / 手势拖拽弹簧）
 //! - 每个区块容器使用 SlideUp 入场，卡片内部使用 FadeIn 交错入场
 //! - 点击 Replay 重播全部动画；点击右上角按钮切换深/浅色主题
 
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Bounds, Context, ElementId, InteractiveElement, IntoElement, Render, Styled,
-    Window, WindowBounds, WindowOptions, div, hsla, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, ElementId, InteractiveElement, IntoElement, MouseButton,
+    Render, Styled, Window, WindowBounds, WindowOptions, div, hsla, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, Root, Sizable as _, Theme, ThemeMode, WindowExt as _,
@@ -36,8 +37,8 @@ use gpui_component::{
 };
 use gpui_component_assets::Assets;
 use gpui_component_motion::{
-    AnimationSpec, Easing, LoopKind, LoopMotion, Motion, MotionExt, MotionKeyframes, SpringPreset,
-    SpringValue, stagger,
+    AnimationSpec, DragSpring, Easing, LoopKind, LoopMotion, Motion, MotionExt, MotionKeyframes,
+    MotionLifecycle, PresenceSet, SpringPreset, SpringValue, stagger,
 };
 use gpui_platform::application;
 
@@ -61,6 +62,21 @@ struct Gallery {
     /// D8: 弹簧 tick 的订阅句柄 —— 必须持有（Drop 即取消 observe），
     /// 否则弹簧每帧 notify 无法驱动本 view 重绘。
     _spring_sub: gpui::Subscription,
+    /// Phase 3（E10）: 多子元素声明式进出容器 —— 按 key 管理多个 child 的进出场，
+    /// 退场完成自动移除条目；每个 key 独立 epoch / 快照 / 50ms 宽限。
+    presence_set: gpui::Entity<PresenceSet>,
+    /// E10: 三个演示开关，对应 key "a" / "b" / "c" 的期望存在状态。
+    item_a: bool,
+    item_b: bool,
+    item_c: bool,
+    /// Phase 3（D9）: 手势驱动弹簧 —— 拖拽期追赶指针，松手回弹 settle 点。
+    drag_spring: gpui::Entity<DragSpring>,
+    /// D9: 按下时记录的指针起点（用于把窗口坐标换算为拖拽位移）。
+    drag_start_x: f32,
+    /// E10/D9: PresenceSet / DragSpring 内部 notify 的订阅句柄 ——
+    /// 必须持有，否则无法驱动本 view 重绘。
+    _ps_sub: gpui::Subscription,
+    _drag_sub: gpui::Subscription,
     // 交互状态
     switch_val: bool,
     checkbox_val: bool,
@@ -79,6 +95,26 @@ impl Gallery {
         let spring = SpringValue::new(cx, 0.0, SpringPreset::Wobbly);
         // 订阅弹簧每帧 notify，驱动本 view 重绘（否则显示值不会更新）。
         let _spring_sub = cx.observe(&spring, |_, _, cx| cx.notify());
+        // Phase 3（E10）: 多子元素进出容器 —— fade 配对；builder 每帧按 key 重建色块。
+        let presence_set = PresenceSet::new(
+            cx,
+            MotionLifecycle::fade(AnimationSpec::default()),
+            |key, _window, cx| {
+                // 色块内容静态（key 文本），无每帧分配；theme 每帧现取以跟随主题切换。
+                div()
+                    .w(px(140.))
+                    .h(px(56.))
+                    .rounded_lg()
+                    .bg(cx.theme().accent)
+                    .child(div().text_sm().child(key.clone()))
+            },
+        );
+        // E10: set_present / 退场定时器都会 notify PresenceSet —— 订阅驱动本 view 重绘。
+        let _ps_sub = cx.observe(&presence_set, |_, _, cx| cx.notify());
+        // Phase 3（D9）: 手势驱动弹簧 —— 初始值 0，Default 预设（轻微阻尼跟手）。
+        let drag_spring = DragSpring::new(cx, 0.0, SpringPreset::Default);
+        // D9: 弹簧每帧 tick notify —— 订阅驱动本 view 重绘（否则卡片位置不更新）。
+        let _drag_sub = cx.observe(&drag_spring, |_, _, cx| cx.notify());
         Self {
             replay_count: 0,
             dark: false,
@@ -86,6 +122,14 @@ impl Gallery {
             loop_on: false,
             spring,
             _spring_sub,
+            presence_set,
+            item_a: false,
+            item_b: false,
+            item_c: false,
+            drag_spring,
+            drag_start_x: 0.0,
+            _ps_sub,
+            _drag_sub,
             switch_val: true,
             checkbox_val: false,
             radio_val: 0,
@@ -732,6 +776,135 @@ impl Gallery {
         )
     }
 
+    /// PresenceSet & DragSpring（Phase 3）：多子元素声明式进出 + 手势驱动弹簧演示。
+    fn render_presence_drag(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let n = self.replay_count;
+        let item_a = self.item_a;
+        let item_b = self.item_b;
+        let item_c = self.item_c;
+
+        // —— 1) PresenceSet 多 key 进出（E10）——
+        // 三个 key（"a"/"b"/"c"）彼此独立：各自入场 / 退场互不干扰，退场动画结束后
+        // 条目自动从容器移除（对照 Phase 1 的 PresenceState 单 child 特例）。
+        let a_btn = {
+            let btn = Button::new("pd-a");
+            let btn = if item_a { btn.primary() } else { btn.ghost() };
+            btn.label("Item A")
+                .on_click(cx.listener(move |v, _event, window, cx| {
+                    // 切换期望状态并同步到容器；set_present 内部会 notify（经订阅驱动重绘）。
+                    v.item_a = !v.item_a;
+                    let present = v.item_a;
+                    v.presence_set
+                        .update(cx, |s, cx| s.set_present("a", present, window, cx));
+                    cx.notify();
+                }))
+        };
+        let b_btn = {
+            let btn = Button::new("pd-b");
+            let btn = if item_b { btn.primary() } else { btn.ghost() };
+            btn.label("Item B")
+                .on_click(cx.listener(move |v, _event, window, cx| {
+                    v.item_b = !v.item_b;
+                    let present = v.item_b;
+                    v.presence_set
+                        .update(cx, |s, cx| s.set_present("b", present, window, cx));
+                    cx.notify();
+                }))
+        };
+        let c_btn = {
+            let btn = Button::new("pd-c");
+            let btn = if item_c { btn.primary() } else { btn.ghost() };
+            btn.label("Item C")
+                .on_click(cx.listener(move |v, _event, window, cx| {
+                    v.item_c = !v.item_c;
+                    let present = v.item_c;
+                    v.presence_set
+                        .update(cx, |s, cx| s.set_present("c", present, window, cx));
+                    cx.notify();
+                }))
+        };
+        let presence_card = Self::card(
+            cx,
+            ElementId::named_usize("gallery-pd-presence", n),
+            0,
+            v_flex()
+                .gap_3()
+                .items_center()
+                .child(h_flex().gap_2().child(a_btn).child(b_btn).child(c_btn))
+                // PresenceSet 实体本身即元素：内部按 key 重建 child 并播入场 / 退场动画。
+                .child(self.presence_set.clone()),
+        );
+
+        // —— 2) DragSpring 手势拖拽（D9）——
+        // 卡片 left 由弹簧值驱动：按下记录起点并 begin_drag；移动中 drag_to 追赶指针；
+        // 松手 end_drag(0.0) 回弹到轨道起点。弹簧每帧 tick notify，经 _drag_sub 驱动重绘。
+        let drag_value = self.drag_spring.read(cx).value();
+        let drag_card = Self::card(
+            cx,
+            ElementId::named_usize("gallery-pd-drag", n),
+            50,
+            v_flex().gap_3().items_center().child(
+                div()
+                    .relative()
+                    .w(px(320.))
+                    .h(px(80.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().accent.opacity(0.06))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(8.))
+                            .left(px(drag_value))
+                            .w(px(64.))
+                            .h(px(64.))
+                            .rounded_md()
+                            .bg(cx.theme().accent)
+                            .cursor_pointer()
+                            // E3: 交互元素同样用稳定基名 + replay_count（render 内零 format! 造 id）。
+                            .id(ElementId::named_usize("gallery-pd-drag-card", n))
+                            // 事件接线（回调签名已按 gpui 实际 API 核实）：
+                            // on_mouse_down / on_mouse_up 需指定按键；三个回调均为
+                            // Fn(&Mouse*Event, &mut Window, &mut App)，经 cx.listener 取视图状态。
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |v, event: &gpui::MouseDownEvent, window, cx| {
+                                    // 按下：记录指针起点，进入跟手模式（弹簧停在当前值）。
+                                    v.drag_start_x = f32::from(event.position.x);
+                                    v.drag_spring.update(cx, |s, cx| s.begin_drag(window, cx));
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(
+                                move |v, event: &gpui::MouseMoveEvent, window, cx| {
+                                    // 拖动：目标 = 指针位移（窗口坐标 - 按下起点），弹簧阻尼追赶。
+                                    let dx = f32::from(event.position.x) - v.drag_start_x;
+                                    v.drag_spring.update(cx, |s, cx| s.drag_to(dx, window, cx));
+                                },
+                            ))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |v, _event: &gpui::MouseUpEvent, window, cx| {
+                                    // 松手：退出跟手模式，弹簧从当前值回弹并精确收敛到 0。
+                                    v.drag_spring
+                                        .update(cx, |s, cx| s.end_drag(0.0, window, cx));
+                                }),
+                            ),
+                    ),
+            ),
+        );
+
+        self.section_wrapper(
+            cx,
+            "PresenceSet & Drag",
+            "gallery-pd-section",
+            10,
+            vec![presence_card, drag_card],
+        )
+    }
+
     /// section 容器：标题 + 卡片网格，整体使用 SlideUp 动画入场。
     fn section_wrapper(
         &self,
@@ -832,7 +1005,8 @@ impl Render for Gallery {
             .child(self.render_progress_spinner(cx))
             .child(self.render_tooltip_notification(cx))
             .child(self.render_motion_composition(cx))
-            .child(self.render_loop_spring(cx));
+            .child(self.render_loop_spring(cx))
+            .child(self.render_presence_drag(cx));
 
         let scroll_area = div()
             .id("gallery-scroll")

@@ -26,6 +26,8 @@ Rust edition: **2024**. Crate name: `gpui-component-motion`.
 | `PresenceState` | `src/presence.rs` | Declarative presence container (state machine HIDDEN→ENTERING→VISIBLE→EXITING); auto-manages enter/exit timing and unmount |
 | `LoopMotion<T>` + `LoopKind` | `src/loop_motion.rs` | Looping effects (Phase 2 / C7): wraps an `IntoElement + Styled` element in a never-ending animation. `LoopKind::Pulse` (smooth parabola breath, opacity 0.4→1.0→0.4) / `LoopKind::Skeleton` (triangle-wave blink, 0.5→1.0→0.5, shimmer-ish). Convenience ctors `pulse` / `skeleton`; implements `IntoElement` + `ParentElement`; built on `repeat_synced` (shared App clock). **Never ends — must be conditionally mounted and unmounted when done (E1/E2).** |
 | `SpringValue` | `src/spring_value.rs` | Declarative numeric spring (Phase 2 / D8): `Entity<SpringValue>`; `new(cx, initial, preset)` → event-driven `set_target(target, window, cx)` → tick-driven interpolation at ~16ms (60fps) with per-frame `notify`; read `value()` / `target()` in render. Curve matches `SpringPreset` exactly (underdamped presets may overshoot; exact convergence at t≥1); mid-flight `set_target` redirects from the current value (no velocity continuity); same-target short-circuits. |
+| `PresenceSet` | `src/presence_set.rs` | Multi-key declarative presence container (Phase 3 / E10): `Entity<PresenceSet>`; `new(cx, lifecycle, builder)` — builder is `Fn(&SharedString, &mut Window, &mut App) -> Div` (called every frame per key, should capture `WeakEntity`); event-driven `set_present(key, present, window, cx)` — per-key independent enter/exit with S5 epoch guard / S6 transition snapshot / S7 50ms exit grace, entry auto-removed when exit finishes; `set_lifecycle` / `is_present(key)` / `len()` / `is_empty()`. Notifies internally — owning view must `cx.observe(&set, ...)` to redraw. |
+| `DragSpring` | `src/drag.rs` | Gesture-driven spring (Phase 3 / D9): `Entity<DragSpring>`; `new(cx, initial, preset)` → event-driven `begin_drag(window, cx)` / `drag_to(value, window, cx)` / `end_drag(settle, window, cx)`. Drag-phase target = pointer (damped follow); release springs back and converges exactly at `settle`. `value()` / `dragging()`; non-dragging `drag_to` ignored (idempotent). ~16ms tick with per-frame `notify` — owning view must subscribe to redraw. |
 
 ## Usage Patterns
 
@@ -261,6 +263,62 @@ let current = value.read(cx).value();
   task is dropped and a generation guard ignores stale ticks. No velocity continuity.
 - Same-target calls short-circuit (no new task, no notify).
 - Read `value()` / `target()` only in render; never call `set_target` from render.
+
+### 8. Phase 3: PresenceSet & DragSpring (E10 / D9)
+
+**`PresenceSet` is the multi-key generalization of `PresenceState`.** Create the
+`Entity<PresenceSet>` once with a shared `MotionLifecycle` and a builder that rebuilds
+each key's child every frame; then declare each key's desired presence on events. Every key
+gets its own independent enter/exit lifecycle (S5 epoch guard, S6 transition snapshots,
+S7 50ms exit grace) — typical for list add/remove, tabs, notification stacks:
+
+```rust
+use gpui_component_motion::{AnimationSpec, MotionLifecycle, PresenceSet};
+
+// Create once; the builder is Fn(&SharedString, &mut Window, &mut App) -> Div and
+// should capture a WeakEntity (not Entity) to read latest state without cycles.
+let set = PresenceSet::new(
+    cx,
+    MotionLifecycle::fade(AnimationSpec::default()),
+    move |key, _window, cx| div().child(key.clone()),
+);
+
+// Event-driven: enter / exit per key (entry auto-removed when exit finishes)
+set.update(cx, |s, cx| {
+    s.set_present("tab-1", self.tab_1_open, window, cx);
+    s.set_present("tab-2", self.tab_2_open, window, cx);
+});
+
+// Insert as a child element
+row.child(set.clone());
+```
+
+- Per-key state is fully independent: `is_present(key)` reports the latest declared
+  target; `len()` includes entries still playing their exit animation.
+- `set_present` / the exit timer both `notify` the container — **the owning view must
+  `cx.observe(&set, |_, _, cx| cx.notify())` to redraw** (same wiring as the Phase 2
+  `SpringValue` cards in the gallery).
+
+**`DragSpring` is the gesture-semantics wrapper of `SpringValue`.** Instead of declaring
+a target, wire the drag lifecycle: during drag the target follows the pointer (the spring
+dampens, so the element trails slightly); on release it springs back to the settle point
+and converges exactly (no residual):
+
+```rust
+use gpui_component_motion::{DragSpring, SpringPreset};
+
+let spring = DragSpring::new(cx, 0.0, SpringPreset::Default);
+
+// on_mouse_down -> begin_drag(window, cx): enter follow mode, spring holds at current value
+// on_mouse_move -> drag_to(pointer_x, window, cx): target = pointer, damped chase
+// on_mouse_up   -> end_drag(settle_x, window, cx): release, spring back to settle
+```
+
+- `drag_to` outside a drag (no `begin_drag`) is ignored (idempotent, no task spawned).
+- `value()` renders the current position; `dragging()` distinguishes follow vs. settle.
+- The spring ticks at ~16ms and `notify`s every frame — **the owning view must
+  `cx.observe(&spring, |_, _, cx| cx.notify())` to redraw**, otherwise the rendered
+  position never updates.
 
 ## Critical Constraints
 

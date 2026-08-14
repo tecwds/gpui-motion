@@ -81,6 +81,7 @@
 #![warn(missing_docs)]
 
 mod animated;
+mod drag;
 mod easing;
 mod ext;
 mod keyframes;
@@ -88,11 +89,13 @@ mod lifecycle;
 mod loop_motion;
 mod motion;
 mod presence;
+mod presence_set;
 mod spec;
 mod spring_value;
 mod stagger;
 
 pub use animated::Animated;
+pub use drag::DragSpring;
 pub use easing::{Easing, SpringPreset};
 pub use ext::MotionExt;
 pub use keyframes::{Keyframe, MotionKeyframes};
@@ -100,6 +103,7 @@ pub use lifecycle::MotionLifecycle;
 pub use loop_motion::{LoopKind, LoopMotion};
 pub use motion::Motion;
 pub use presence::PresenceState;
+pub use presence_set::PresenceSet;
 pub use spec::AnimationSpec;
 pub use spring_value::SpringValue;
 pub use stagger::stagger;

@@ -362,6 +362,83 @@ let current = value.read(cx).value();
 - **短路**：目标未变且无进行中动画时不启动新 tick、不 `notify`。
 - 渲染端每帧读取 `value()`，勿在 render 内调用 `set_target`。
 
+## 多子元素进出与手势拖拽（Phase 3）
+
+Phase 3 新增两组能力：多子元素声明式进出容器（`PresenceSet`，E10）与手势驱动弹簧
+（`DragSpring`，D9）。二者互不依赖，可独立使用。
+
+### 多子元素进出（PresenceSet）
+
+`PresenceSet` 是 `PresenceState` 的多 key 泛化：按 `SharedString` key 管理任意数量
+的 child，每个 key 拥有独立、互不干扰的进出场生命周期。典型场景：列表项增删、标签页
+切换、通知栈。
+
+```rust
+use gpui_component_motion::{AnimationSpec, MotionLifecycle, PresenceSet};
+use gpui::{div, px, Styled};
+
+// 一次创建：builder 每帧按 key 重建 child（应捕获 WeakEntity 读取最新状态，避免循环引用）
+let weak = cx.entity().downgrade();
+let set = PresenceSet::new(
+    cx,
+    MotionLifecycle::fade(AnimationSpec::default()),
+    move |key, window, cx| {
+        if let Some(strong) = weak.upgrade() {
+            strong.read(cx).render_item(key, window, cx)
+        } else {
+            div()
+        }
+    },
+);
+
+// 每帧更新期望状态：true 入场 / false 退场
+self.set.update(cx, |s, cx| {
+    s.set_present("tab-1", self.tab_1_open, window, cx);
+    s.set_present("tab-2", self.tab_2_open, window, cx);
+});
+
+// 插入到元素树
+row.child(self.set.clone());
+```
+
+- **每 key 独立生命周期（S5/S6/S7）**：每个 key 独立沿用 `PresenceState` 的状态机
+  语义——S5 epoch 守卫（退场定时器回调仅当 `closing && epoch` 匹配时生效，退场中途
+  重开无副作用）、S6 转换快照（进行中的过渡不受后续 `set_lifecycle` 影响）、
+  S7 卸载宽限（定时器 = 退场时长 + delay + 50ms，兜底 GPUI 动画起点滞后一帧）。
+- **退场完成自动移除**：退场动画结束后条目自动从容器移除（`len()` 减小），
+  多 key 互不干扰；`is_present(key)` 返回最近一次声明的期望状态。
+- **必须订阅**：`set_present` 内部会 `cx.notify()` —— 调用方需
+  `cx.observe(&set, |_, _, cx| cx.notify())` 驱动自身重绘（gallery 演示同款接线）。
+
+### 手势驱动弹簧（DragSpring）
+
+`DragSpring` 是 `SpringValue` 的手势语义封装：不暴露"目标值"，而是暴露拖拽生命周期
+（按住 / 拖动 / 松手）。**拖拽期**目标 = 指针位置，弹簧每帧追赶指针产生轻微阻尼的跟手
+效果；**松手**目标 = 调用方指定的 settle 点，弹簧从当前值回弹并精确收敛到该点。
+
+```rust
+use gpui_component_motion::{DragSpring, SpringPreset};
+
+// 一次创建：初始值 0，Default 预设（轻微阻尼跟手）
+let spring = DragSpring::new(cx, 0.0, SpringPreset::Default);
+
+// on_mouse_down：进入跟手模式，弹簧停在当前值
+spring.update(cx, |s, cx| s.begin_drag(window, cx));
+// on_mouse_move：目标 = 指针位置，弹簧阻尼追赶
+spring.update(cx, |s, cx| s.drag_to(pointer_x, window, cx));
+// on_mouse_up：目标 = settle 点，松手回弹并精确收敛
+spring.update(cx, |s, cx| s.end_drag(settle_x, window, cx));
+
+// render 中读取当前值（拖拽期跟手、松手期回弹）
+let current = spring.read(cx).value();
+```
+
+- **典型用途**：抽屉拖拽关闭（松手 settle 到关闭位 / 阈值另一侧）、卡片拖走（swipe，
+  松手 settle 到屏幕外或回弹原位）、滑块跟手（thumb 位置 = `value()`）。
+- **非拖拽态忽略**：未 `begin_drag` 时调用 `drag_to` 直接返回（幂等，不启动任务）。
+- **必须订阅**：弹簧每帧 tick 会 `cx.notify()` —— 调用方需
+  `cx.observe(&spring, |_, _, cx| cx.notify())` 驱动自身重绘，否则显示值不更新。
+
 ## 已知限制
 
 - **打断跳变（S8）**：GPUI `Animation` 不支持自定义起始进度，退场→入场 / 入场→退场
