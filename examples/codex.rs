@@ -7,10 +7,13 @@
 //! - 中间对话区：顶部 chat 标题 + 模型 badge；消息流（user / assistant / 代码块 / 工具调用 / diff）；底部 composer
 //! - 右侧面板：可开/关，含 Browser / Files / Terminal / Summary 标签
 //!
-//! 动画（MotionExt）：
-//! - 侧边栏 slide_right 入场
-//! - 顶部栏 fade_in；消息依次 slide_up 交错入场
-//! - 右侧面板 slide_left 入场；composer slide_up 入场
+//! 动画（MotionExt + gpui-component-motion Phase 1-4）：
+//! - 侧边栏 slide_right 入场；顶部栏 fade_in；消息依次 slide_up 交错入场
+//! - Phase 1：badge 文字色插值（TextColor）、用户气泡背景色插值（BackgroundColor）、
+//!   assistant 区块关键帧（MotionKeyframes）、Files 列表 stagger 级联
+//! - Phase 2：打字指示器气泡 LoopMotion 呼吸；Summary tokens SpringValue 计数
+//! - Phase 3：右侧面板 tab 内容 PresenceSet 进出场；Browser CTA 卡片 DragSpring 拖拽回弹
+//! - Phase 4：右侧面板入场用 MotionTokens::panel 令牌
 //! - 点击 Replay 重播全部动画；右上角按钮切换深/浅主题、开/关右侧面板
 
 use std::time::Duration;
@@ -28,7 +31,8 @@ use gpui_component::{
 };
 use gpui_component_assets::Assets;
 use gpui_component_motion::{
-    AnimationSpec, MotionExt, MotionLifecycle, PresenceState, SpringPreset,
+    AnimationSpec, DragSpring, Easing, LoopMotion, Motion, MotionExt, MotionKeyframes,
+    MotionLifecycle, MotionTokens, PresenceSet, PresenceState, SpringPreset, SpringValue, stagger,
 };
 use gpui_platform::application;
 
@@ -61,6 +65,15 @@ impl RightPanelTab {
             RightPanelTab::Files => IconName::Folder,
             RightPanelTab::Terminal => IconName::Frame,
             RightPanelTab::Summary => IconName::Inspector,
+        }
+    }
+    /// Phase 3（E10）/ PresenceSet：tab 对应的 key 字符串（进出场条目标识）。
+    fn key(self) -> &'static str {
+        match self {
+            RightPanelTab::Browser => "browser",
+            RightPanelTab::Files => "files",
+            RightPanelTab::Terminal => "terminal",
+            RightPanelTab::Summary => "summary",
         }
     }
 }
@@ -114,15 +127,30 @@ struct CodexApp {
     replay_count: usize,
     dark: bool,
     right_panel_open: bool,
-    /// 是否处于"正在生成"状态：为 true 时才挂载打字指示器（含 `Spinner`）。
-    /// Spinner 是 `Animation::repeat()` 组件（永不 done，C10），常驻挂载会
-    /// 把整棵 codex 树钉在满帧率重绘；空闲时必须卸载（E2）。
+    /// 是否处于"正在生成"状态：为 true 时才挂载打字指示器（含 `Spinner` 与
+    /// Phase 2 的 `LoopMotion` 呼吸气泡）。两者都是 repeat() 类组件
+    /// （永不 done，C10），常驻挂载会把整棵 codex 树钉在满帧率重绘；
+    /// 空闲时必须卸载（E2）。
     working: bool,
     /// 入场动画使用 Spring 物理缓动（true）或传统 EaseOut（false）。
     use_spring: bool,
     /// 右侧面板的声明式生命周期动画状态。
     right_panel_presence: gpui::Entity<PresenceState>,
     right_panel_tab: RightPanelTab,
+    /// Phase 2（D8）：Summary 面板的 tokens 计数弹簧 —— Replay 时 `set_target` 弹到 1240。
+    tokens: gpui::Entity<SpringValue>,
+    /// D8: 弹簧每帧 tick notify —— 订阅驱动本 view 重绘（Drop 即取消 observe）。
+    _tokens_sub: gpui::Subscription,
+    /// Phase 3（E10）：右侧面板 4 个 tab 内容按 key 管理进出场（PresenceSet）。
+    tabs_presence: gpui::Entity<PresenceSet>,
+    /// E10: PresenceSet 内部 notify 的订阅句柄。
+    _tabs_sub: gpui::Subscription,
+    /// Phase 3（D9）：Browser CTA 卡片的手势弹簧 —— 拖拽期追赶指针，松手回弹 0。
+    drag: gpui::Entity<DragSpring>,
+    /// D9: 按下时记录的指针起点（窗口坐标换算拖拽位移）。
+    drag_start_x: f32,
+    /// D9: 弹簧每帧 tick notify —— 订阅驱动本 view 重绘。
+    _drag_sub: gpui::Subscription,
     active_nav: NavItem,
     input: gpui::Entity<InputState>,
     chats: Vec<ChatItem>,
@@ -152,6 +180,35 @@ impl CodexApp {
                 }
             },
         );
+        // Phase 2（D8）：tokens 弹簧 —— 初始值 0，Replay 时弹到 1240。
+        let tokens = SpringValue::new(cx, 0.0, SpringPreset::Default);
+        // D8: 弹簧 tick 每帧 notify —— 订阅驱动本 view 重绘。
+        let _tokens_sub = cx.observe(&tokens, |_, _, cx| cx.notify());
+
+        // Phase 3（E10）：右侧面板 tab 内容按 key 管理进出场（tooltip 配对）。
+        // builder 捕获 WeakEntity 读取最新状态，按 key 分发到具体 tab 内容。
+        let weak_tabs = cx.entity().downgrade();
+        let tabs_presence = PresenceSet::new(
+            cx,
+            MotionTokens::tooltip().lifecycle(),
+            move |key, window, cx| {
+                if let Some(strong) = weak_tabs.upgrade() {
+                    strong
+                        .read(cx)
+                        .render_panel_content(strong.clone(), key, window, cx)
+                } else {
+                    div()
+                }
+            },
+        );
+        // E10: set_present / 退场定时器都会 notify PresenceSet —— 订阅驱动本 view 重绘。
+        let _tabs_sub = cx.observe(&tabs_presence, |_, _, cx| cx.notify());
+
+        // Phase 3（D9）：CTA 卡片拖拽弹簧 —— 初始值 0，Default 预设（轻微阻尼跟手）。
+        let drag = DragSpring::new(cx, 0.0, SpringPreset::Default);
+        // D9: 弹簧每帧 tick notify —— 订阅驱动本 view 重绘。
+        let _drag_sub = cx.observe(&drag, |_, _, cx| cx.notify());
+
         Self {
             replay_count: 0,
             dark: true,
@@ -160,6 +217,13 @@ impl CodexApp {
             use_spring: true,
             right_panel_presence,
             right_panel_tab: RightPanelTab::Browser,
+            tokens,
+            _tokens_sub,
+            tabs_presence,
+            _tabs_sub,
+            drag,
+            drag_start_x: 0.0,
+            _drag_sub,
             active_nav: NavItem::NewChat,
             input,
             chats: vec![
@@ -452,7 +516,13 @@ impl CodexApp {
                                 .py_0p5()
                                 .rounded_md()
                                 .bg(theme.accent.opacity(0.12))
-                                .text_color(openai_green())
+                                // Phase 1（A1）/ 颜色插值：badge 文字色从品牌绿渐变到
+                                // 主题强调色入场（icon 继承文字色同步渐变）。
+                                .with_motion(
+                                    ElementId::named_usize("codex-badge", self.replay_count),
+                                    spec,
+                                    Motion::TextColor(openai_green().into(), theme.accent),
+                                )
                                 .child(Icon::new(IconName::Bot).xsmall())
                                 .child(div().text_xs().child("GPT-5.5")),
                         ),
@@ -508,11 +578,15 @@ impl CodexApp {
                                 .primary()
                                 .icon(IconName::Play)
                                 .label("Replay")
-                                .on_click(cx.listener(move |v, _, _, cx| {
+                                .on_click(cx.listener(move |v, _, window, cx| {
                                     // E4: demo 惯用法 —— 换全部 ElementId 重放动画。
                                     // 真实应用应保持稳定 id，只对变更的元素 re-notify，
                                     // 而不是全局换 id 重挂所有动画。
                                     v.replay_count += 1;
+                                    // Phase 2（D8）：Replay 时 tokens 弹簧弹到 1240
+                                    //（Summary 面板显示计数）。
+                                    v.tokens
+                                        .update(cx, |s, cx| s.set_target(1240.0, window, cx));
                                     cx.notify();
                                 })),
                         ),
@@ -556,6 +630,7 @@ impl CodexApp {
         let m1 = self.render_user_message(
             cx,
             ElementId::named_usize("codex-m1", self.replay_count),
+            ElementId::named_usize("codex-m1-bubble", self.replay_count),
             0,
             "帮我重构 auth 模块，改成 async/await 风格，并加上错误处理。",
         );
@@ -602,6 +677,7 @@ impl CodexApp {
         let m3 = self.render_user_message(
             cx,
             ElementId::named_usize("codex-m3", self.replay_count),
+            ElementId::named_usize("codex-m3-bubble", self.replay_count),
             520,
             "好的，顺便加上。",
         );
@@ -621,11 +697,12 @@ impl CodexApp {
         messages
     }
 
-    /// 用户消息：右对齐气泡
+    /// 用户消息：右对齐气泡（Phase 1 / 背景色插值入场）
     fn render_user_message(
         &self,
         cx: &Context<Self>,
         id: impl Into<gpui::ElementId>,
+        bubble_id: impl Into<gpui::ElementId>,
         delay_ms: u64,
         text: &'static str,
     ) -> impl IntoElement {
@@ -643,17 +720,26 @@ impl CodexApp {
                     .px_4()
                     .py_2p5()
                     .rounded_lg()
-                    .bg(theme.accent.opacity(0.16))
                     .text_color(theme.foreground)
                     .text_sm()
                     // E3: &'static str 直接作文本元素，零分配，替代 to_string()。
-                    .child(text),
+                    .child(text)
+                    // Phase 1（A1）/ 颜色插值：气泡背景从 accent 8% 渐变到 16% 入场
+                    //（静态 bg 会被动画终态覆盖，故不再单独设置）。
+                    .with_motion(
+                        bubble_id,
+                        spec,
+                        Motion::BackgroundColor(
+                            theme.accent.opacity(0.08),
+                            theme.accent.opacity(0.16),
+                        ),
+                    ),
             )
             .slide_up(id, px(16.))
             .with_spec(spec)
     }
 
-    /// assistant 区块：头像 + 名称 + 内容列表，整体 slide_up
+    /// assistant 区块：头像 + 名称 + 内容列表，整体关键帧动画入场
     fn render_assistant_block(
         &self,
         cx: &Context<Self>,
@@ -662,11 +748,8 @@ impl CodexApp {
         children: Vec<gpui::AnyElement>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let spec = AnimationSpec::default()
-            .with_delay(Duration::from_millis(delay_ms))
-            .with_duration(Duration::from_millis(420));
 
-        h_flex()
+        let container = h_flex()
             .gap_3()
             .items_start()
             .child(
@@ -697,12 +780,17 @@ impl CodexApp {
                             ),
                     )
                     .children(children),
-            )
-            .slide_up(id, px(20.))
-            .with_spec(spec)
+            );
+
+        // Phase 1（B4）/ MotionKeyframes：淡入 + 上滑两段式入场（ratio 等权 1:1
+        // 拆分总时长：前 50% 淡入、后 50% 上滑）。MotionKeyframes 无 delay 参数，
+        // 把 delay 并入总时长近似原 slide_up + with_delay 语义（整体略慢）。
+        MotionKeyframes::new(container, id, Duration::from_millis(420 + delay_ms))
+            .keyframe(1.0, Easing::EaseOut, Motion::Fade)
+            .keyframe(1.0, Easing::EaseOut, Motion::SlideUp(px(20.)))
     }
 
-    /// assistant 正在思考：spinner + 文案
+    /// assistant 正在思考：spinner + 文案（气泡 LoopMotion 呼吸，Phase 2）
     fn render_typing(
         &self,
         cx: &Context<Self>,
@@ -713,6 +801,25 @@ impl CodexApp {
         let spec = AnimationSpec::default()
             .with_delay(Duration::from_millis(delay_ms))
             .with_duration(Duration::from_millis(380));
+
+        // Phase 2（C7）/ LoopMotion：气泡整体 Pulse 呼吸（900ms 周期）。
+        // 与 Spinner 构成双循环：Spinner 提供"工作中"旋转指示，Pulse 强化气泡
+        // 存在感。两者均为 repeat() 类组件（永不 done）——保持既有条件挂载语义
+        // （E2）：仅 working 时挂载，空闲绝不挂载。
+        let pulsing = LoopMotion::pulse(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .bg(theme.accent.opacity(0.06))
+                .text_color(theme.muted_foreground)
+                .child(gpui_component::spinner::Spinner::new().small())
+                .child(div().text_sm().child("Codex is working…")),
+            ElementId::named_usize("codex-typing-pulse", self.replay_count),
+            Duration::from_millis(900),
+        );
 
         h_flex()
             .gap_3()
@@ -728,18 +835,7 @@ impl CodexApp {
                     .text_color(rgb(0xffffff))
                     .child(Icon::new(IconName::Bot).small()),
             )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded_lg()
-                    .bg(theme.accent.opacity(0.06))
-                    .text_color(theme.muted_foreground)
-                    .child(gpui_component::spinner::Spinner::new().small())
-                    .child(div().text_sm().child("Codex is working…")),
-            )
+            .child(pulsing)
             .slide_up(id, px(16.))
             .with_spec(spec)
     }
@@ -1065,9 +1161,21 @@ impl CodexApp {
                 .cursor_pointer()
                 .child(Icon::new(t.icon()).xsmall())
                 .child(div().text_xs().child(t.label()))
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                     tab_entity.update(cx, |v, cx| {
                         v.right_panel_tab = t;
+                        // Phase 3（E10）/ PresenceSet：切换 tab 时对 4 个 key 声明
+                        // 期望状态 —— 新 tab 入场、其余退场（退场完成自动移除条目）。
+                        v.tabs_presence.update(cx, |s, cx| {
+                            for tab in [
+                                RightPanelTab::Browser,
+                                RightPanelTab::Files,
+                                RightPanelTab::Terminal,
+                                RightPanelTab::Summary,
+                            ] {
+                                s.set_present(tab.key(), tab == t, window, cx);
+                            }
+                        });
                         cx.notify();
                     });
                 });
@@ -1088,14 +1196,6 @@ impl CodexApp {
                 }),
         );
 
-        // 内容区（根据 tab 切换）
-        let content: gpui::Div = match active_tab {
-            RightPanelTab::Browser => self.render_panel_browser(cx),
-            RightPanelTab::Files => self.render_panel_files(cx),
-            RightPanelTab::Terminal => self.render_panel_terminal(cx),
-            RightPanelTab::Summary => self.render_panel_summary(cx),
-        };
-
         let panel = v_flex()
             .h_full()
             .w(px(340.))
@@ -1109,16 +1209,37 @@ impl CodexApp {
                     .id("panel-content-scroll")
                     .flex_1()
                     .overflow_y_scroll()
-                    .child(content),
+                    // Phase 3（E10）/ PresenceSet：内容区按 key 管理进出场
+                    //（切换 tab 时旧内容退场、新内容入场）。
+                    .child(self.tabs_presence.clone()),
             );
 
-        // 内容区直接放入 scroll 容器，不再单独包 fade_in（Presence 处理面板级动画）
         panel
     }
 
-    /// 右侧面板 - Browser 内容：模拟内嵌浏览器
-    fn render_panel_browser(&self, cx: &App) -> gpui::Div {
+    /// 右侧面板内容区：PresenceSet builder 按 key 分发到具体 tab 内容。
+    fn render_panel_content(
+        &self,
+        entity: gpui::Entity<Self>,
+        key: &SharedString,
+        _window: &mut Window,
+        cx: &App,
+    ) -> gpui::Div {
+        match key.as_ref() {
+            "browser" => self.render_panel_browser(entity, cx),
+            "files" => self.render_panel_files(cx),
+            "terminal" => self.render_panel_terminal(cx),
+            "summary" => self.render_panel_summary(cx),
+            _ => div(),
+        }
+    }
+
+    /// 右侧面板 - Browser 内容：模拟内嵌浏览器（CTA 卡片可拖拽，Phase 3）
+    fn render_panel_browser(&self, entity: gpui::Entity<Self>, cx: &App) -> gpui::Div {
         let theme = cx.theme();
+        // Phase 3（D9）：渲染期每帧读取弹簧值，驱动 CTA 卡片 left。
+        let drag_value = self.drag.read(cx).value();
+        let drag_entity = entity.clone();
         v_flex()
             .gap_3()
             .p_3()
@@ -1170,14 +1291,74 @@ impl CodexApp {
                                     .child("Built with Codex · deployed to Vercel"),
                             )
                             .child(
+                                // Phase 3（D9）/ DragSpring：CTA 卡片可水平拖拽 ——
+                                // 拖拽期弹簧追赶指针、松手回弹到 0（轨道 = relative 容器）。
                                 div()
-                                    .px_4()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(openai_green())
-                                    .text_color(rgb(0xffffff))
-                                    .text_sm()
-                                    .child("Get Started"),
+                                    .relative()
+                                    .w_full()
+                                    .h(px(44.))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top(px(4.))
+                                            .left(px(drag_value))
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_md()
+                                            .bg(openai_green())
+                                            .text_color(rgb(0xffffff))
+                                            .text_sm()
+                                            .cursor_pointer()
+                                            // E3: 稳定基名 + replay_count 造 id（render 内
+                                            // 零 format!）；必须有 .id() 才有 hitbox（D9）。
+                                            .id(ElementId::named_usize(
+                                                "codex-cta-drag",
+                                                self.replay_count,
+                                            ))
+                                            .on_mouse_down(gpui::MouseButton::Left, {
+                                                let drag_entity = drag_entity.clone();
+                                                move |event: &gpui::MouseDownEvent, window, cx| {
+                                                    drag_entity.update(cx, |v, cx| {
+                                                        // 按下：记录指针起点，
+                                                        // 进入跟手模式（弹簧停在当前值）。
+                                                        v.drag_start_x =
+                                                            f32::from(event.position.x);
+                                                        v.drag.update(cx, |s, cx| {
+                                                            s.begin_drag(window, cx)
+                                                        });
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            })
+                                            .on_mouse_move({
+                                                let drag_entity = drag_entity.clone();
+                                                move |event: &gpui::MouseMoveEvent, window, cx| {
+                                                    drag_entity.update(cx, |v, cx| {
+                                                        // 拖动：目标 = 指针位移（窗口坐标 -
+                                                        // 按下起点），弹簧阻尼追赶。
+                                                        let dx = f32::from(event.position.x)
+                                                            - v.drag_start_x;
+                                                        v.drag.update(cx, |s, cx| {
+                                                            s.drag_to(dx, window, cx)
+                                                        });
+                                                    });
+                                                }
+                                            })
+                                            .on_mouse_up(gpui::MouseButton::Left, {
+                                                let drag_entity = drag_entity.clone();
+                                                move |_event: &gpui::MouseUpEvent, window, cx| {
+                                                    drag_entity.update(cx, |v, cx| {
+                                                        // 松手：退出跟手模式，
+                                                        // 弹簧回弹并精确收敛到 0。
+                                                        v.drag.update(cx, |s, cx| {
+                                                            s.end_drag(0.0, window, cx)
+                                                        });
+                                                    });
+                                                }
+                                            })
+                                            .child("Get Started"),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1191,7 +1372,7 @@ impl CodexApp {
             )
     }
 
-    /// 右侧面板 - Files 内容
+    /// 右侧面板 - Files 内容（Phase 1 / stagger 级联入场）
     fn render_panel_files(&self, cx: &App) -> gpui::Div {
         let theme = cx.theme();
         let files = [
@@ -1201,9 +1382,12 @@ impl CodexApp {
             "Cargo.toml",
             "README.md",
         ];
-        let mut list = v_flex().p_3().gap_0p5();
-        for (i, f) in files.iter().enumerate() {
-            list = list.child(
+        // Phase 1（B5）/ stagger：每行 fade_in 后统一级联 —— 第 i 行延迟 40ms * i，
+        // 依次入场形成级联。id 用基名 + 下标（NamedInteger），render 内零 format!。
+        let items: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
                 h_flex()
                     // E3: 稳定基名 + 下标（NamedInteger），替代每帧 format! 造 id。
                     .id(("file", i))
@@ -1215,10 +1399,12 @@ impl CodexApp {
                     .hover(|s| s.bg(theme.accent.opacity(0.08)))
                     .cursor_pointer()
                     .child(Icon::new(IconName::File).xsmall())
-                    .child(div().text_sm().child(*f)),
-            );
-        }
-        list
+                    .child(div().text_sm().child(*f))
+                    .fade_in(ElementId::named_usize("file-fade", i))
+            })
+            .collect();
+        let staggered = stagger(items, Duration::from_millis(40));
+        v_flex().p_3().gap_0p5().children(staggered)
     }
 
     /// 右侧面板 - Terminal 内容
@@ -1267,9 +1453,11 @@ impl CodexApp {
             )
     }
 
-    /// 右侧面板 - Summary 内容：agent 计划 / 来源 / 产物
+    /// 右侧面板 - Summary 内容：agent 计划 / tokens / 来源 / 产物
     fn render_panel_summary(&self, cx: &App) -> gpui::Div {
         let theme = cx.theme();
+        // Phase 2（D8）：tokens 弹簧当前值（每帧读取；Replay 时弹到 1240）。
+        let tokens_value = self.tokens.read(cx).value();
         v_flex()
             .p_3()
             .gap_4()
@@ -1308,6 +1496,23 @@ impl CodexApp {
                                     .child(div().text_xs().child(*s))
                             }),
                         ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Tokens"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            // E3 例外（demo 专用）：弹簧值每帧变化，允许此处 1 次 format!。
+                            .child(format!("{:.0}", tokens_value)),
                     ),
             )
             .child(
@@ -1359,29 +1564,41 @@ impl CodexApp {
 }
 
 impl Render for CodexApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let right_panel_open = self.right_panel_open;
         let use_spring = self.use_spring;
 
-        // 根据 use_spring 构建 lifecycle：Spring 物理缓动 vs 传统 EaseOut
+        // Phase 4（MotionTokens）：面板入场改用 panel 令牌；保留 use_spring 切换
+        //（true 用令牌默认 Spring 物理缓动，false 退回传统 EaseOut 300ms）。
         let lifecycle = if use_spring {
-            MotionLifecycle::expand_width(
-                px(340.),
-                AnimationSpec::default().with_spring(SpringPreset::Default),
-            )
-            .with_exit_spec(AnimationSpec::default().with_duration(Duration::from_millis(250)))
+            MotionTokens::panel().lifecycle()
         } else {
-            MotionLifecycle::expand_width(
-                px(340.),
-                AnimationSpec::default().with_duration(Duration::from_millis(300)),
-            )
-            .with_exit_spec(AnimationSpec::default().with_duration(Duration::from_millis(250)))
+            MotionTokens::panel()
+                .with_enter(
+                    Motion::ExpandWidth(px(340.)),
+                    AnimationSpec::default().with_duration(Duration::from_millis(300)),
+                )
+                .lifecycle()
         };
 
         // 更新 Presence 动画配对 + 期望状态
         self.right_panel_presence.update(cx, |s, presence_cx| {
             s.set_lifecycle(lifecycle, presence_cx);
-            s.set_present(right_panel_open, _window, presence_cx);
+            s.set_present(right_panel_open, window, presence_cx);
+        });
+
+        // Phase 3（E10）/ PresenceSet：每帧同步 4 个 tab key 的期望状态
+        //（短路幂等；初始仅 Browser，切换时旧 tab 退场、新 tab 入场）。
+        let active_tab = self.right_panel_tab;
+        self.tabs_presence.update(cx, |s, presence_cx| {
+            for tab in [
+                RightPanelTab::Browser,
+                RightPanelTab::Files,
+                RightPanelTab::Terminal,
+                RightPanelTab::Summary,
+            ] {
+                s.set_present(tab.key(), tab == active_tab, window, presence_cx);
+            }
         });
 
         h_flex()
