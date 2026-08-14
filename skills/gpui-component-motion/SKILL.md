@@ -28,6 +28,7 @@ Rust edition: **2024**. Crate name: `gpui-component-motion`.
 | `SpringValue` | `src/spring_value.rs` | Declarative numeric spring (Phase 2 / D8): `Entity<SpringValue>`; `new(cx, initial, preset)` → event-driven `set_target(target, window, cx)` → tick-driven interpolation at ~16ms (60fps) with per-frame `notify`; read `value()` / `target()` in render. Curve matches `SpringPreset` exactly (underdamped presets may overshoot; exact convergence at t≥1); mid-flight `set_target` redirects from the current value (no velocity continuity); same-target short-circuits. |
 | `PresenceSet` | `src/presence_set.rs` | Multi-key declarative presence container (Phase 3 / E10): `Entity<PresenceSet>`; `new(cx, lifecycle, builder)` — builder is `Fn(&SharedString, &mut Window, &mut App) -> Div` (called every frame per key, should capture `WeakEntity`); event-driven `set_present(key, present, window, cx)` — per-key independent enter/exit with S5 epoch guard / S6 transition snapshot / S7 50ms exit grace, entry auto-removed when exit finishes; `set_lifecycle` / `is_present(key)` / `len()` / `is_empty()`. Notifies internally — owning view must `cx.observe(&set, ...)` to redraw. |
 | `DragSpring` | `src/drag.rs` | Gesture-driven spring (Phase 3 / D9): `Entity<DragSpring>`; `new(cx, initial, preset)` → event-driven `begin_drag(window, cx)` / `drag_to(value, window, cx)` / `end_drag(settle, window, cx)`. Drag-phase target = pointer (damped follow); release springs back and converges exactly at `settle`. `value()` / `dragging()`; non-dragging `drag_to` ignored (idempotent). ~16ms tick with per-frame `notify` — owning view must subscribe to redraw. |
+| `MotionTokens` | `src/tokens.rs` | Named component motion presets (Phase 4 / F12): `panel` / `tooltip` / `modal` / `notification` / `dropdown` / `toast` — each hardens a "component → enter/exit motion pairing" for zero-config access. `Copy` struct, all fields public (`enter` / `enter_spec` / `exit` / `exit_spec`); ctor `custom(enter, enter_spec, exit, exit_spec)`; methods `animate(inner, id) -> Animated<T>` (one-line entry wrapper), `lifecycle() -> MotionLifecycle` (for `PresenceState` / `PresenceSet`), `with_enter(motion, spec)` / `with_exit(motion, spec)`. **I3 line**: exit specs never carry Spring — presets are built Spring-free and `custom` / `with_exit` force-strip via `AnimationSpec::without_spring()`. |
 
 ## Usage Patterns
 
@@ -319,6 +320,43 @@ let spring = DragSpring::new(cx, 0.0, SpringPreset::Default);
 - The spring ticks at ~16ms and `notify`s every frame — **the owning view must
   `cx.observe(&spring, |_, _, cx| cx.notify())` to redraw**, otherwise the rendered
   position never updates.
+
+### 9. Phase 4: MotionTokens — zero-config presets (F12)
+
+`MotionTokens` hardens common "component → motion pairing" into named presets
+(`panel` / `tooltip` / `modal` / `notification` / `dropdown` / `toast`), so callers
+never hand-assemble `Motion` + `AnimationSpec` pairs. It is a `Copy` struct with public
+fields; customize via `custom(enter, enter_spec, exit, exit_spec)`, or per-side
+`with_enter(motion, spec)` / `with_exit(motion, spec)`.
+
+**Consumption 1 — one-line entry (zero-config access):**
+
+```rust
+use gpui_component_motion::MotionTokens;
+use gpui::{div, px, Styled};
+
+// Plays the token's enter animation at render time — no Motion/AnimationSpec juggling
+let el = MotionTokens::panel().animate(
+    div().w(px(340.)).h(px(80.)).child("content"),
+    "panel-el",
+);
+```
+
+**Consumption 2 — full lifecycle pairing for presence containers:**
+
+```rust
+use gpui_component_motion::MotionTokens;
+
+// Equivalent to hand-building MotionLifecycle::fade(...) / expand_width(...) etc.
+let lc = MotionTokens::modal().lifecycle();
+let presence = PresenceState::new(cx, "dialog", lc, builder);
+// or: let set = PresenceSet::new(cx, MotionTokens::notification().lifecycle(), builder);
+```
+
+**I3 line (no-Spring exits):** every token's `exit_spec` never carries Spring —
+overshooting to negative values is meaningless for width/opacity. Presets are built
+Spring-free; `custom` / `with_exit` force-strip via `AnimationSpec::without_spring()`.
+There is no construction path to a Spring exit.
 
 ## Critical Constraints
 

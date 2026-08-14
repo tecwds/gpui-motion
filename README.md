@@ -439,6 +439,66 @@ let current = spring.read(cx).value();
 - **必须订阅**：弹簧每帧 tick 会 `cx.notify()` —— 调用方需
   `cx.observe(&spring, |_, _, cx| cx.notify())` 驱动自身重绘，否则显示值不更新。
 
+## 组件动效令牌（Phase 4）
+
+Phase 4 新增 `MotionTokens`（F12）：把「组件 → 入场 / 退场动效配对」固化为命名预设，
+调用方无需记忆 `Motion` / `AnimationSpec` 的配对细节——一行即可拿到入场包装器
+（`.animate(...)`）或完整生命周期配对（`.lifecycle()`），把「一行接入」升级为「零配置接入」。
+
+### 预设对照表
+
+| 预设 | 组件场景 | 入场动效 | 入场规格 | 退场动效 | 退场规格 |
+|------|----------|----------|----------|----------|----------|
+| `panel()` | 侧边栏 / 面板 | `ExpandWidth(340px)` | `default` + `Spring::Default` | `ExpandWidth(340px)` | `default` |
+| `tooltip()` | tooltip / 小浮层 | `Fade` | `fast`（120ms EaseOut） | `Fade` | `fast` |
+| `modal()` | 弹窗 | `Fade` | `default` + `Spring::Gentle` | `Fade` | `slow`（350ms EaseInOut） |
+| `notification()` | 通知条（右侧滑入） | `SlideLeft(40px)` | `fast` + 250ms | `SlideLeft(40px)` | `fast` |
+| `dropdown()` | 下拉 / 折叠 | `ExpandHeight(200px)` | `default` | `ExpandHeight(200px)` | `default` |
+| `toast()` | 轻提示（底部滑入） | `SlideUp(16px)` | `default` + `Spring::Default` | `SlideUp(16px)` | `fast` |
+
+### 消费方式一：一行入场（animate）
+
+`MotionTokens::xxx().animate(inner, id)` 把任意 `IntoElement + Styled` 元素与入场动效
+绑定，返回 `Animated<T>` 直接插入元素树，渲染期自动播放入场动画：
+
+```rust
+use gpui_component_motion::MotionTokens;
+use gpui::{div, px, Styled};
+
+// 零配置：Fade + fast（120ms EaseOut），无需自己拼 Motion / AnimationSpec
+let el = MotionTokens::tooltip().animate(
+    div().w(px(120.)).h(px(80.)).rounded_lg(),
+    "tooltip-el",
+);
+```
+
+### 消费方式二：完整生命周期配对（lifecycle）
+
+`MotionTokens::xxx().lifecycle()` 直接产出 `MotionLifecycle`（入场 + 退场配对），
+交给 `PresenceState` / `PresenceSet` 使用——与手写 `MotionLifecycle::fade(...)` 等
+预设完全等价：
+
+```rust
+use gpui_component_motion::MotionTokens;
+
+// 交给 PresenceState：声明"元素何时该存在"，框架自动播入场 / 退场并卸载
+let presence = PresenceState::new(cx, "right-panel", MotionTokens::panel().lifecycle(), |window, cx| {
+    div().w(px(340.)).h_full().child("panel content")
+});
+
+// 或交给 PresenceSet 作为多 key 共享生命周期
+let set = PresenceSet::new(cx, MotionTokens::modal().lifecycle(), builder);
+```
+
+> **I3 防线：退场规格永远无 Spring**。退场动画对尺寸 / 透明度过冲到负值无视觉意义，
+> 因此所有令牌的 `exit_spec` 恒不携带 Spring：预设直接构造为无 Spring 规格；
+> `custom(enter, enter_spec, exit, exit_spec)` 与 `.with_exit(motion, spec)` 传入的
+> 退场规格也会经 `AnimationSpec::without_spring()` 强制剥离——任何构造路径都无法
+> 产出带 Spring 的退场。
+>
+> `MotionTokens` 为 `Copy` 且字段全部公开（`enter` / `enter_spec` / `exit` / `exit_spec`），
+> 可在预设基础上用 `.with_enter(...)` / `.with_exit(...)` 局部定制，或 `custom(...)` 全自定义。
+
 ## 已知限制
 
 - **打断跳变（S8）**：GPUI `Animation` 不支持自定义起始进度，退场→入场 / 入场→退场

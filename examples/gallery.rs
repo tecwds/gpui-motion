@@ -9,6 +9,7 @@
 //! - Motion Composition（Phase 1：颜色插值 / Keyframes / Stagger）
 //! - Loop & SpringValue（Phase 2：循环动效 / 数值弹簧）
 //! - PresenceSet & DragSpring（Phase 3：多子元素进出 / 手势拖拽弹簧）
+//! - Motion Tokens（Phase 4：组件动效令牌 / 零配置入场预设）
 //! - 每个区块容器使用 SlideUp 入场，卡片内部使用 FadeIn 交错入场
 //! - 点击 Replay 重播全部动画；点击右上角按钮切换深/浅色主题
 
@@ -38,7 +39,7 @@ use gpui_component::{
 use gpui_component_assets::Assets;
 use gpui_component_motion::{
     AnimationSpec, DragSpring, Easing, LoopKind, LoopMotion, Motion, MotionExt, MotionKeyframes,
-    MotionLifecycle, PresenceSet, SpringPreset, SpringValue, stagger,
+    MotionLifecycle, MotionTokens, PresenceSet, SpringPreset, SpringValue, stagger,
 };
 use gpui_platform::application;
 
@@ -905,6 +906,95 @@ impl Gallery {
         )
     }
 
+    /// Motion Tokens（Phase 4，F12）：常见组件的动效令牌 —— 零配置接入。
+    ///
+    /// 两种消费方式：`MotionTokens::xxx().animate(el, id)` 一行包装入场（渲染期自动播放，
+    /// 无需记忆 Motion / AnimationSpec 配对）；`MotionTokens::xxx().lifecycle()` 产出
+    /// MotionLifecycle 供 PresenceState / PresenceSet 使用（完整进出场配对）。
+    /// 本演示展示 4 个预设的 animate 对比 —— Replay 换 id 即重播（E3/E4）。
+    fn render_motion_tokens(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let n = self.replay_count;
+
+        // —— 1) 一行入场：tooltip().animate(div(), id) 直接插入元素树，渲染期自动播放入场 ——
+        let one_liner_card = Self::card(
+            cx,
+            ElementId::named_usize("gallery-tk-oneliner", n),
+            0,
+            v_flex()
+                .gap_3()
+                .items_center()
+                .child(
+                    // 零配置：Fade + fast（120ms EaseOut），无需自己拼 Motion / AnimationSpec。
+                    MotionTokens::tooltip().animate(
+                        div()
+                            .w(px(120.))
+                            .h(px(80.))
+                            .rounded_lg()
+                            .bg(cx.theme().accent),
+                        ElementId::named_usize("gallery-tk-tooltip", n),
+                    ),
+                )
+                .child(div().text_sm().child("tooltip().animate() 一行入场")),
+        );
+
+        // —— 2) 预设对比：tooltip / notification / toast / dropdown 各 animate 一个色块 ——
+        // token 名与 id 基名都是 &'static str，直接作 child / id 基名（render 内零 format!）。
+        let tokens: [(&'static str, MotionTokens, &'static str); 4] = [
+            ("tooltip", MotionTokens::tooltip(), "gallery-tk-tooltip"),
+            (
+                "notification",
+                MotionTokens::notification(),
+                "gallery-tk-notification",
+            ),
+            ("toast", MotionTokens::toast(), "gallery-tk-toast"),
+            ("dropdown", MotionTokens::dropdown(), "gallery-tk-dropdown"),
+        ];
+        let blocks: Vec<_> = tokens
+            .iter()
+            .map(|&(name, token, id_base)| {
+                v_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        // E3: 稳定基名 + replay_count，避免 render 内 format! 造 id。
+                        token.animate(
+                            div()
+                                .w(px(120.))
+                                .h(px(80.))
+                                .rounded_lg()
+                                .bg(cx.theme().accent),
+                            ElementId::named_usize(id_base, n),
+                        ),
+                    )
+                    .child(div().text_sm().child(name))
+            })
+            .collect();
+        let compare_card = Self::card(
+            cx,
+            ElementId::named_usize("gallery-tk-compare", n),
+            60,
+            v_flex()
+                .gap_3()
+                .items_center()
+                .child(h_flex().gap_4().flex_wrap().children(blocks))
+                // lifecycle() 消费方式说明（Phase 3 的 PresenceState / PresenceSet 用法）。
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("同款令牌亦可 .lifecycle() 供 PresenceState / PresenceSet 消费"),
+                ),
+        );
+
+        self.section_wrapper(
+            cx,
+            "Motion Tokens",
+            "gallery-tk-section",
+            11,
+            vec![one_liner_card, compare_card],
+        )
+    }
+
     /// section 容器：标题 + 卡片网格，整体使用 SlideUp 动画入场。
     fn section_wrapper(
         &self,
@@ -1006,7 +1096,8 @@ impl Render for Gallery {
             .child(self.render_tooltip_notification(cx))
             .child(self.render_motion_composition(cx))
             .child(self.render_loop_spring(cx))
-            .child(self.render_presence_drag(cx));
+            .child(self.render_presence_drag(cx))
+            .child(self.render_motion_tokens(cx));
 
         let scroll_area = div()
             .id("gallery-scroll")

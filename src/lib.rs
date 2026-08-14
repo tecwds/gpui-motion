@@ -93,6 +93,7 @@ mod presence_set;
 mod spec;
 mod spring_value;
 mod stagger;
+mod tokens;
 
 pub use animated::Animated;
 pub use drag::DragSpring;
@@ -107,3 +108,4 @@ pub use presence_set::PresenceSet;
 pub use spec::AnimationSpec;
 pub use spring_value::SpringValue;
 pub use stagger::stagger;
+pub use tokens::MotionTokens;
