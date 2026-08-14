@@ -7,13 +7,19 @@
 //! 输出可超过 `1`（过冲），在 [`crate::Animated`] 层接管而非走 GPUI easing，
 //! 因此不受 `[0, 1]` 约束限制。
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::LazyLock;
 use std::time::Duration;
+
+use gpui::Animation;
 
 /// 常用缓动曲线。
 ///
 /// `at(t)` 接收 `[0, 1]` 区间的线性进度并返回 `[0, 1]` 区间的缓动进度。
 /// 输出必须落在 `[0, 1]` 内——这是 GPUI `Animation` 内部 `debug_assert` 的约束。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Easing {
     /// 线性：`t` 原样返回。
     Linear,
@@ -68,7 +74,7 @@ impl Easing {
 /// （GPUI 内部 `debug_assert` 要求输出 ∈ `[0, 1]`）。
 /// [`crate::Animated`] 在 Spring 模式下将 GPUI easing 设为 `Linear`
 /// （原样传递线性进度），在 animator 回调内部调用 `curve(t)` 做物理映射。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SpringPreset {
     /// 临界阻尼（ζ=1.0, ω₀=35）：无过冲，快速稳定。适合退场、折叠。
     Stiff,
@@ -81,29 +87,9 @@ pub enum SpringPreset {
 }
 
 impl SpringPreset {
-    /// 返回 (阻尼比 ζ, 自然频率 ω₀)。
-    fn params(&self) -> (f32, f32) {
-        match self {
-            SpringPreset::Stiff => (1.0, 35.0),
-            SpringPreset::Default => (0.7, 30.0),
-            SpringPreset::Gentle => (0.5, 25.0),
-            SpringPreset::Wobbly => (0.3, 28.0),
-        }
-    }
-
-    /// 截断时间：Spring 曲线归一化到 `[0, 1]` 时间域时对应的物理时间。
-    ///
-    /// - 临界 / 过阻尼（ζ ≥ 1）：衰减包络为 `e^(-ω₀t) * (1 + ω₀t)`，
-    ///   比纯指数慢，需要 `ω₀t ≈ 6.5` 才能使残差 < 2%。
-    /// - 欠阻尼（ζ < 1）：衰减包络为纯指数 `e^(-ζω₀t)`，
-    ///   `ζω₀t ≈ 4.6`（ln 100）即可使残差 < 1%。
-    fn cutoff_time(&self) -> f32 {
-        let (zeta, omega) = self.params();
-        if zeta >= 1.0 {
-            6.5 / omega
-        } else {
-            4.605_17 / (zeta * omega)
-        }
+    /// 返回本预设的预计算常量（P4）。
+    fn constants(&self) -> &'static SpringConstants {
+        &SPRING_TABLE[*self as usize]
     }
 
     /// 推荐动画时长：基于截止时间自动推导。
@@ -123,7 +109,7 @@ impl SpringPreset {
     ///     < SpringPreset::Wobbly.recommended_duration());
     /// ```
     pub fn recommended_duration(&self) -> Duration {
-        Duration::from_secs_f32(self.cutoff_time())
+        Duration::from_secs_f32(self.constants().cutoff)
     }
 
     /// Spring 曲线：输入归一化线性进度 `t`（`[0, 1]`），
@@ -132,6 +118,9 @@ impl SpringPreset {
     /// - `t = 0` → `0`（起始位置）
     /// - `t = 1` → `≈ 1`（稳定位置，残差 < 2%）
     /// - 中间可能 > 1（欠阻尼过冲）
+    ///
+    /// 常量（ζ、ω、截断时间、ω_d、ζω）已在 `SPRING_TABLE` 预计算（P4），
+    /// 每样本仅做 `exp` / `cos` / `sin` 与线性组合。
     ///
     /// # 示例
     ///
@@ -150,26 +139,123 @@ impl SpringPreset {
     /// ```
     pub fn curve(&self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
-        let (zeta, omega) = self.params();
-        let pt = t * self.cutoff_time();
+        let c = self.constants();
+        let pt = t * c.cutoff;
 
-        if zeta >= 1.0 {
+        if c.zeta >= 1.0 {
             // 临界阻尼：x(t) = 1 - e^(-ω₀t) * (1 + ω₀t)
-            let e = (-omega * pt).exp();
-            1.0 - e * (1.0 + omega * pt)
+            let e = (-c.omega * pt).exp();
+            1.0 - e * (1.0 + c.omega * pt)
         } else {
             // 欠阻尼：x(t) = 1 - e^(-ζω₀t) * (cos(ωdt) + (ζω₀/ωd) * sin(ωdt))
-            let omega_d = omega * (1.0 - zeta * zeta).sqrt();
-            let decay = (-zeta * omega * pt).exp();
-            let cos = (omega_d * pt).cos();
-            let sin = (omega_d * pt).sin();
-            1.0 - decay * (cos + (zeta * omega / omega_d) * sin)
+            let decay = (-c.zeta * c.omega * pt).exp();
+            let cos = (c.omega_d * pt).cos();
+            let sin = (c.omega_d * pt).sin();
+            1.0 - decay * (cos + (c.zeta_omega / c.omega_d) * sin)
         }
     }
 }
 
+/// Spring 预设的预计算常量（P4）。
+///
+/// 截断时间的推导：
+/// - 临界 / 过阻尼（ζ ≥ 1）：衰减包络为 `e^(-ω₀t) * (1 + ω₀t)`，
+///   比纯指数慢，需要 `ω₀t ≈ 6.5` 才能使残差 < 2%。
+/// - 欠阻尼（ζ < 1）：衰减包络为纯指数 `e^(-ζω₀t)`，
+///   `ζω₀t ≈ 4.6`（ln 100）即可使残差 < 1%。
+struct SpringConstants {
+    /// 阻尼比 ζ。
+    zeta: f32,
+    /// 自然频率 ω₀。
+    omega: f32,
+    /// 截断时间：Spring 曲线归一化到 `[0, 1]` 时间域时对应的物理时间。
+    cutoff: f32,
+    /// 阻尼振荡频率 ω_d = ω₀·√(1-ζ²)（欠阻尼分支）。
+    omega_d: f32,
+    /// ζ·ω₀（衰减指数系数）。
+    zeta_omega: f32,
+}
+
+impl SpringConstants {
+    fn new(zeta: f32, omega: f32) -> Self {
+        Self {
+            zeta,
+            omega,
+            cutoff: if zeta >= 1.0 {
+                6.5 / omega
+            } else {
+                4.605_17 / (zeta * omega)
+            },
+            // `f32::sqrt` 在 const 上下文中不可用（rustc 1.96 仍未 const-stable），
+            // 故整表用 `LazyLock` 一次性初始化（spec P4 允许 once_cell/static 方案）。
+            omega_d: omega * (1.0 - zeta * zeta).sqrt(),
+            zeta_omega: zeta * omega,
+        }
+    }
+}
+
+/// 按预设索引的常量表（P4）：`curve(t)` 每样本只做 `exp`/`cos`/`sin` + 线性组合。
+///
+/// 常量与旧版逐点公式逐位一致（见 T16），初始化后只读、零每帧开销。
+static SPRING_TABLE: LazyLock<[SpringConstants; 4]> = LazyLock::new(|| {
+    [
+        SpringConstants::new(1.0, 35.0), // Stiff（临界阻尼）
+        SpringConstants::new(0.7, 30.0), // Default
+        SpringConstants::new(0.5, 25.0), // Gentle
+        SpringConstants::new(0.3, 28.0), // Wobbly
+    ]
+});
+
+// === P1：`Animation` 按规格键的 Rc 缓存 ===
+
+/// 动画缓存键：完全由公开输入决定（时长、延迟、缓动、弹簧、方向）。
+///
+/// `spring` 为 `Option`——`None`（传统缓动模式）与任一预设生成的 easing
+/// 闭包不同，必须参与键区分。
+pub(crate) type AnimKey = (Duration, Duration, Easing, Option<SpringPreset>, bool);
+
+/// 缓存容量上限：超出后停止插入新键（命中既有键仍有效），防止无界增长。
+const ANIM_CACHE_CAP: usize = 128;
+
+thread_local! {
+    /// 主线程 UI 的动画缓存：`thread_local!` 无锁、无需 `Send`/`Sync`。
+    static ANIM_CACHE: RefCell<HashMap<AnimKey, Rc<Animation>>> = RefCell::new(HashMap::new());
+}
+
+/// 全局动画缓存访问器（P1）。
+///
+/// gpui 为主线程 UI 框架，动画构建只发生在主线程，因此采用
+/// `thread_local! + RefCell<HashMap>`——无锁、零开销；键完全由公开输入
+/// 决定（`Duration` 有界），无生命周期问题。容量上限 `ANIM_CACHE_CAP`。
+pub(crate) struct AnimationCache;
+
+impl AnimationCache {
+    /// 命中返回缓存的同一 `Rc`（`Rc::ptr_eq` 成立）；未命中调用 `build`
+    /// 构建并插入缓存（不超过 `ANIM_CACHE_CAP` 条）。
+    pub(crate) fn get_or_insert(
+        &self,
+        key: AnimKey,
+        build: impl FnOnce() -> Rc<Animation>,
+    ) -> Rc<Animation> {
+        if let Some(anim) = ANIM_CACHE.with(|cell| cell.borrow().get(&key).cloned()) {
+            return anim;
+        }
+        let anim = build();
+        ANIM_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            if cache.len() < ANIM_CACHE_CAP {
+                cache.insert(key, anim.clone());
+            }
+        });
+        anim
+    }
+}
+
+/// 全局动画缓存句柄（P1）。
+pub(crate) static ANIMATION_CACHE: AnimationCache = AnimationCache;
+
 /// 弹簧进度：`t >= 1.0` 时精确返回 `1.0`（覆盖 GPUI 末帧钉住与 `reduce_motion`
-/// 直达终态路径，见规格 S2），否则返回 [`SpringPreset::curve`] 值（保留过冲）
+/// 直达终态路径，S2：t≥1 精确返回 1.0），否则返回 [`SpringPreset::curve`] 值（保留过冲）
 /// 并防御性钳制负值。
 ///
 /// 仅用于入场方向；退场经 [`crate::AnimationSpec::without_spring`] 强制剥离 Spring。
@@ -402,5 +488,52 @@ mod tests {
             wobbly_max > default_max,
             "Wobbly overshoot ({wobbly_max}) should exceed Default ({default_max})"
         );
+    }
+
+    /// T16（P4）：常量表驱动的新 `curve` 与旧版逐点公式数值完全一致
+    /// （保护既有 4 个 preset 的曲线行为）。
+    #[test]
+    fn spring_constants_match_legacy_curve() {
+        fn legacy_curve(preset: SpringPreset, t: f32) -> f32 {
+            let t = t.clamp(0.0, 1.0);
+            let (zeta, omega) = match preset {
+                SpringPreset::Stiff => (1.0, 35.0),
+                SpringPreset::Default => (0.7, 30.0),
+                SpringPreset::Gentle => (0.5, 25.0),
+                SpringPreset::Wobbly => (0.3, 28.0),
+            };
+            let cutoff = if zeta >= 1.0 {
+                6.5 / omega
+            } else {
+                4.605_17 / (zeta * omega)
+            };
+            let pt = t * cutoff;
+            if zeta >= 1.0 {
+                let e = (-omega * pt).exp();
+                1.0 - e * (1.0 + omega * pt)
+            } else {
+                let omega_d = omega * (1.0 - zeta * zeta).sqrt();
+                let decay = (-zeta * omega * pt).exp();
+                let cos = (omega_d * pt).cos();
+                let sin = (omega_d * pt).sin();
+                1.0 - decay * (cos + (zeta * omega / omega_d) * sin)
+            }
+        }
+
+        for preset in [
+            SpringPreset::Stiff,
+            SpringPreset::Default,
+            SpringPreset::Gentle,
+            SpringPreset::Wobbly,
+        ] {
+            for i in 0..=1000 {
+                let t = i as f32 / 1000.0;
+                assert_eq!(
+                    preset.curve(t),
+                    legacy_curve(preset, t),
+                    "{preset:?} at t={t}: 常量表曲线与旧公式不一致"
+                );
+            }
+        }
     }
 }

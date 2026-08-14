@@ -240,6 +240,25 @@ EXITING ──定时器到期但 epoch 不匹配──▶ 忽略（无副作用�
   trait，且 `fade_in` / `slide_up` / `with_motion` 等方法名在依赖图中全局抢占——属
   有意设计（一行接入的代价，详见 `ext.rs` 模块文档）。
 
+## 性能
+
+本库运行在 GPUI 的"每帧重建"模型之上，以下成本属框架特性，按需知悉与规避：
+
+- **每帧成本随树规模线性增长**：GPUI 每次重绘都会重跑 `render`、重建整棵元素树并全量
+  重算 taffy 布局（`ViewElement::request_layout` 无条件重跑 render；布局引擎每次 draw
+  全量清空重排）。任一动画活跃期间整窗每帧都执行上述流程，树越大、每帧成本越高。
+- **常驻 `repeat()` 组件会钉住整窗满帧重绘**：`Spinner` / `ProgressCircle::loading(true)`
+  等基于 `Animation::repeat()` 的组件永不结束，每帧请求下一帧，驱动窗口以满刷新率持续
+  重绘**整个会话**（空闲也烧满 CPU/GPU）。请用状态标志（如 `loading`）条件挂载，
+  完成后立即卸载，空闲时不展示。
+- **`delay` 会延长重绘窗口**：`delay` 折叠进缓动前缀，`AnimationElement` 在延迟期仍每帧
+  tick——子树每帧全量重排（layout + paint）+ 驱动整窗重绘。长 delay（>300ms）需知悉成本。
+- **render 保持零分配**：render 每帧执行，其中的任何堆分配都是每帧成本。避免在 render
+  内用 `format!` 拼接 id / 文本（随条目数线性增长），改用稳定 `ElementId` 基名 + 计数
+  （`ElementId::NamedInteger` / `named_usize`）与静态字符串；逐行文本在 render 外预构建复用。
+- **低成本范本**：`examples/story.rs` 是刻意保持最小开销的对照实现——纯静态内容、
+  无常驻动画、文本零分配（仅 9 张静态卡片的 id 各 1 次 `format!`），作为衡量真实成本的下限参考。
+
 ## Examples
 
 ```sh

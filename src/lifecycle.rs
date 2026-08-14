@@ -1,7 +1,7 @@
 //! 入场 + 退场动画配对。
 //!
 //! [`MotionLifecycle`] 描述一个元素在 mount 与 unmount 时分别使用的动效，
-//! 供 [`crate::Presence`] 使用——调用方只声明"元素何时该存在"，
+//! 供 [`crate::PresenceState`] 使用——调用方只声明"元素何时该存在"，
 //! 框架自动按配对播入场 / 退场动画。
 
 use gpui::Pixels;
@@ -13,14 +13,14 @@ use crate::{AnimationSpec, Motion};
 /// `enter` 与 `exit` 可以是不同的 [`Motion`]（例如入场滑入、退场淡出），
 /// 也可以使用不同的 [`AnimationSpec`]（例如退场更快）。
 ///
-/// 退场规格经 [`AnimationSpec::without_spring`] 强制剥离 Spring（I3）。
+/// 退场规格经 [`AnimationSpec::without_spring`] 强制剥离 Spring（I3：退场曲线严格单调）。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotionLifecycle {
     /// 入场动效。
     pub enter: Motion,
     /// 退场动效。
     pub exit: Motion,
-    /// 入场规格（时长 / 延迟 / 缓动）。
+    /// 入场规格（时长 / 延迟 / 缓动 / 可选 Spring 预设）。
     pub enter_spec: AnimationSpec,
     /// 退场规格（时长 / 延迟 / 缓动）。
     pub exit_spec: AnimationSpec,
@@ -29,7 +29,7 @@ pub struct MotionLifecycle {
 impl MotionLifecycle {
     /// 创建配对，入场与退场共用同一规格。
     ///
-    /// 退场规格经 `without_spring()` 剥离 Spring（时长按 S3 规则重置）。
+    /// 退场规格经 `without_spring()` 剥离 Spring（S3 规则：退场剥离 Spring、未显式覆盖时重置 200ms）。
     pub fn new(enter: Motion, exit: Motion, spec: AnimationSpec) -> Self {
         Self {
             enter,
@@ -41,7 +41,7 @@ impl MotionLifecycle {
 
     /// 仅覆盖退场规格，入场规格保持不变。
     ///
-    /// 传入的规格经 `without_spring()` 剥离 Spring（时长按 S3 规则重置）。
+    /// 传入的规格经 `without_spring()` 剥离 Spring（S3 规则：退场剥离 Spring、未显式覆盖时重置 200ms）。
     pub fn with_exit_spec(mut self, spec: AnimationSpec) -> Self {
         self.exit_spec = spec.without_spring();
         self

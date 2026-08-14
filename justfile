@@ -14,13 +14,13 @@ default:
 run:
     cargo run --example gallery
 
-# 运行指定 example: just example fade
+# 运行指定 example: just example codex
 example name:
     cargo run --example {{name}}
 
 # 监听变更自动重运行 demo（需先: cargo install cargo-watch）
 watch:
-    cargo watch -x "run --example demo"
+    cargo watch -x "run --example gallery"
 
 # === 质量门禁 ===
 
@@ -57,3 +57,7 @@ build:
 # 清理构建产物
 clean:
     cargo clean
+
+# 生成 API 文档（含私有条目；门禁：零警告）
+doc:
+    cargo doc --no-deps --document-private-items

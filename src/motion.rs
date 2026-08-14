@@ -3,7 +3,8 @@
 //! 每个 [`Motion`] 变体描述一种入场视觉效果，
 //! 通过 [`Motion::apply`] 将缓动进度 `t`（`0 → 1`）映射到具体样式。
 //!
-//! 仅使用 `Styled` 提供的 `opacity` / `top` / `left` 实现位移与淡入——
+//! 仅使用 `Styled` 提供的 `opacity` / `top` / `left` / `width` / `height`
+//! 实现位移、淡入与尺寸展开——
 //! GPUI 的 `Styled` 不支持 `scale` / `transform`，因此 `ScaleIn` / `Pop`
 //! 等缩放类效果无法在不自定义 `Element` 的前提下实现，留待后续阶段。
 
@@ -78,7 +79,7 @@ impl Motion {
     /// （GPUI `Styled` refinement 不可移除、不可读回，属框架限制）；
     /// 建议将动画应用于包装元素而非直接动画元素本身。
     ///
-    /// 输入钳制（I8）：
+    /// 输入钳制（I8：Fade/Expand 钳制到 `[0, 1]`，Slide* 仅拒绝负值）：
     /// - `Fade` / `Expand*`：钳制到 `[0, 1]`（透明度过冲无视觉意义、尺寸不允许越过目标）；
     /// - `Slide*`：仅拒绝负值，允许 `> 1` 过冲（位移过冲有效果）。
     ///

@@ -22,7 +22,7 @@ use crate::{Animated, AnimationSpec, Motion};
 /// 为元素添加入场动画的快捷方法。
 ///
 /// 对所有实现了 `IntoElement + Styled + 'static` 的类型自动实现（blanket impl，
-/// 一致性限制见[模块文档](self)）。
+/// 一致性限制：下游无法再为具体类型实现本 trait，方法名在依赖图中全局独占）。
 ///
 /// # 示例
 ///
@@ -114,7 +114,7 @@ pub trait MotionExt: IntoElement + Styled + Sized {
 
 /// blanket impl：为所有 `IntoElement + Styled + 'static` 类型提供 [`MotionExt`] 方法。
 ///
-/// 一致性限制见[模块文档](self)：下游不可再为具体类型实现本 trait，
+/// 一致性限制：下游不可再为具体类型实现本 trait，
 /// 方法名在依赖图中全局抢占——属有意设计。
 impl<E: IntoElement + Styled + 'static> MotionExt for E {}
 

@@ -9,12 +9,12 @@ pub(crate) const MIN_ANIMATION_DURATION: Duration = Duration::from_millis(1);
 
 /// 描述一次动画的时长、延迟与缓动曲线。
 ///
-/// `delay` 通过将缓动函数的前半段映射为 `0` 实现，
+/// `delay` 通过将缓动输入的前导 `delay/(delay+duration)` 区间映射为 `0` 实现，
 /// 因此无需额外的计时器或帧调度——GPUI 的 `Animation` 基座即可处理。
 ///
 /// `spring` 字段为 `Some` 时启用 Spring 物理动画：入场使用 Spring 曲线
 /// （可能过冲），退场则经 [`without_spring`](Self::without_spring) 强制剥离
-/// （退场过冲到负值无意义，见 S3）。
+/// （S3 规则：退场剥离 Spring、未显式覆盖时重置 200ms；退场过冲到负值无意义）。
 ///
 /// # 示例
 ///

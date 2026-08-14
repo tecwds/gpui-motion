@@ -6,6 +6,12 @@
 //! - 5 种 Motion：Fade / SlideUp / SlideDown / SlideLeft / SlideRight
 //! - 4 种 Easing：Linear / EaseIn / EaseOut / EaseInOut
 //! - 点击 Replay 重播所有动画
+//!
+//! 低成本范本（E4）：本示例是三个 demo 中每帧成本最低的 —— 无常驻
+//! `repeat()` 组件、文本全部用 `&'static str` 零分配渲染、id 仅在 9 张
+//! 静态卡片上各做一次 `format!` 拼接（无每帧文本分配）。Replay 采用
+//! "换全部 ElementId"的 demo 惯用法（见下方 `replay_count`）；
+//! 真实应用应保持稳定 id，只对变更的元素 re-notify。
 
 use gpui::{
     App, Bounds, Context, InteractiveElement, IntoElement, MouseButton, Render, SharedString,
@@ -28,7 +34,10 @@ struct EasingCard {
 }
 
 struct Story {
-    /// 每次点击 Replay 时递增，用于生成新的 ElementId 以重启动画
+    /// 每次点击 Replay 时递增，用于生成新的 ElementId 以重启动画。
+    ///
+    /// 注意（E4）：demo 专属惯用法 —— 真实应用应保持稳定 id，
+    /// 只对变更的元素 re-notify，而不是全局换 id 重挂所有动画。
     replay_count: usize,
 }
 

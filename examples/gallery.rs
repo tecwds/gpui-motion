@@ -12,8 +12,8 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Bounds, Context, InteractiveElement, IntoElement, Render, Styled, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, ElementId, InteractiveElement, IntoElement, Render, Styled,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, Root, Sizable as _, Theme, ThemeMode, WindowExt as _,
@@ -37,10 +37,17 @@ use gpui_component_motion::{AnimationSpec, MotionExt};
 use gpui_platform::application;
 
 struct Gallery {
-    /// 每次点击 Replay 时递增，用于生成新的 ElementId 以重启动画
+    /// 每次点击 Replay 时递增，用于生成新的 ElementId 以重启动画。
+    ///
+    /// 注意（E4）：这是 demo 专属惯用法 —— 真实应用应保持稳定 id，
+    /// 只对变更的元素 re-notify，而不是全局换 id 重挂所有动画。
     replay_count: usize,
     /// 是否深色主题
     dark: bool,
+    /// 是否处于"加载中"状态：为 true 时才挂载 Spinner / loading ProgressCircle。
+    /// 这些组件内部是 `Animation::repeat()`（永不 done，C10），常驻挂载会把窗口
+    /// 钉在满帧率重绘整个会话；空闲时必须卸载（E1）。
+    loading: bool,
     // 交互状态
     switch_val: bool,
     checkbox_val: bool,
@@ -58,6 +65,7 @@ impl Gallery {
         Self {
             replay_count: 0,
             dark: false,
+            loading: false,
             switch_val: true,
             checkbox_val: false,
             radio_val: 0,
@@ -94,75 +102,76 @@ impl Gallery {
     }
 
     /// section 标题
-    fn section_title(cx: &Context<Self>, text: &str) -> impl IntoElement {
+    fn section_title(cx: &Context<Self>, text: &'static str) -> impl IntoElement {
         div()
             .text_color(cx.theme().muted_foreground)
             .text_sm()
-            .child(text.to_string())
+            .child(text)
     }
 
     // —— 各区块渲染 ——
 
     fn render_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-btn", self.replay_count);
+        // E3: 稳定基名 + replay_count 计数（NamedInteger），避免每帧 format! 造 id。
+        let n = self.replay_count;
         let cards = vec![
             Self::card(
                 cx,
-                format!("{}-default", p),
+                ElementId::named_usize("gallery-btn-default", n),
                 0,
                 Button::new("b1").label("Default"),
             ),
             Self::card(
                 cx,
-                format!("{}-primary", p),
+                ElementId::named_usize("gallery-btn-primary", n),
                 40,
                 Button::new("b2").primary().label("Primary"),
             ),
             Self::card(
                 cx,
-                format!("{}-secondary", p),
+                ElementId::named_usize("gallery-btn-secondary", n),
                 80,
                 Button::new("b3").secondary().label("Secondary"),
             ),
             Self::card(
                 cx,
-                format!("{}-danger", p),
+                ElementId::named_usize("gallery-btn-danger", n),
                 120,
                 Button::new("b4").danger().label("Danger"),
             ),
             Self::card(
                 cx,
-                format!("{}-success", p),
+                ElementId::named_usize("gallery-btn-success", n),
                 160,
                 Button::new("b5").success().label("Success"),
             ),
             Self::card(
                 cx,
-                format!("{}-warning", p),
+                ElementId::named_usize("gallery-btn-warning", n),
                 200,
                 Button::new("b6").warning().label("Warning"),
             ),
             Self::card(
                 cx,
-                format!("{}-outline", p),
+                ElementId::named_usize("gallery-btn-outline", n),
                 240,
                 Button::new("b7").outline().label("Outline"),
             ),
             Self::card(
                 cx,
-                format!("{}-ghost", p),
+                ElementId::named_usize("gallery-btn-ghost", n),
                 280,
                 Button::new("b8").ghost().label("Ghost"),
             ),
             Self::card(
                 cx,
-                format!("{}-link", p),
+                ElementId::named_usize("gallery-btn-link", n),
                 320,
                 Button::new("b9").link().label("Link"),
             ),
             Self::card(
                 cx,
-                format!("{}-icon", p),
+                ElementId::named_usize("gallery-btn-icon", n),
                 360,
                 Button::new("b10")
                     .primary()
@@ -171,21 +180,21 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-icon-only", p),
+                ElementId::named_usize("gallery-btn-icon-only", n),
                 400,
                 Button::new("b11").ghost().icon(IconName::Search),
             ),
         ];
 
-        self.section_wrapper(cx, "Button", p, 0, cards)
+        self.section_wrapper(cx, "Button", "gallery-btn-section", 0, cards)
     }
 
     fn render_badge_tag(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-bt", self.replay_count);
+        let n = self.replay_count;
         let cards = vec![
             Self::card(
                 cx,
-                format!("{}-badge-1", p),
+                ElementId::named_usize("gallery-bt-badge-1", n),
                 0,
                 Badge::new()
                     .count(3)
@@ -193,7 +202,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-badge-2", p),
+                ElementId::named_usize("gallery-bt-badge-2", n),
                 40,
                 Badge::new()
                     .count(103)
@@ -201,57 +210,57 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-tag-primary", p),
+                ElementId::named_usize("gallery-bt-tag-primary", n),
                 80,
                 Tag::primary().child("Tag"),
             ),
             Self::card(
                 cx,
-                format!("{}-tag-secondary", p),
+                ElementId::named_usize("gallery-bt-tag-secondary", n),
                 120,
                 Tag::secondary().child("Secondary"),
             ),
             Self::card(
                 cx,
-                format!("{}-tag-danger", p),
+                ElementId::named_usize("gallery-bt-tag-danger", n),
                 160,
                 Tag::danger().child("Danger"),
             ),
             Self::card(
                 cx,
-                format!("{}-tag-success", p),
+                ElementId::named_usize("gallery-bt-tag-success", n),
                 200,
                 Tag::success().child("Success"),
             ),
             Self::card(
                 cx,
-                format!("{}-tag-warning", p),
+                ElementId::named_usize("gallery-bt-tag-warning", n),
                 240,
                 Tag::warning().child("Warning"),
             ),
             Self::card(
                 cx,
-                format!("{}-tag-info", p),
+                ElementId::named_usize("gallery-bt-tag-info", n),
                 280,
                 Tag::info().child("Info"),
             ),
         ];
 
-        self.section_wrapper(cx, "Badge & Tag", p, 1, cards)
+        self.section_wrapper(cx, "Badge & Tag", "gallery-bt-section", 1, cards)
     }
 
     fn render_avatar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-av", self.replay_count);
+        let n = self.replay_count;
         let cards = vec![
             Self::card(
                 cx,
-                format!("{}-img-1", p),
+                ElementId::named_usize("gallery-av-img-1", n),
                 0,
                 Avatar::new().src("https://avatars.githubusercontent.com/u/5518?v=4"),
             ),
             Self::card(
                 cx,
-                format!("{}-img-2", p),
+                ElementId::named_usize("gallery-av-img-2", n),
                 50,
                 Avatar::new()
                     .large()
@@ -259,29 +268,29 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-text-1", p),
+                ElementId::named_usize("gallery-av-text-1", n),
                 100,
                 Avatar::new().large().name("Jason Lee"),
             ),
             Self::card(
                 cx,
-                format!("{}-text-2", p),
+                ElementId::named_usize("gallery-av-text-2", n),
                 150,
                 Avatar::new().name("Floyd Wang"),
             ),
             Self::card(
                 cx,
-                format!("{}-placeholder", p),
+                ElementId::named_usize("gallery-av-placeholder", n),
                 200,
                 Avatar::new().small().placeholder(IconName::Building2),
             ),
         ];
 
-        self.section_wrapper(cx, "Avatar", p, 2, cards)
+        self.section_wrapper(cx, "Avatar", "gallery-av-section", 2, cards)
     }
 
     fn render_form_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-fc", self.replay_count);
+        let n = self.replay_count;
         let switch_val = self.switch_val;
         let checkbox_val = self.checkbox_val;
         let radio_val = self.radio_val;
@@ -289,7 +298,7 @@ impl Gallery {
         let cards = vec![
             Self::card(
                 cx,
-                format!("{}-switch", p),
+                ElementId::named_usize("gallery-fc-switch", n),
                 0,
                 Switch::new("sw1")
                     .checked(switch_val)
@@ -300,7 +309,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-checkbox", p),
+                ElementId::named_usize("gallery-fc-checkbox", n),
                 50,
                 Checkbox::new("cb1")
                     .label("Accept")
@@ -312,7 +321,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-radio-1", p),
+                ElementId::named_usize("gallery-fc-radio-1", n),
                 100,
                 Radio::new("r1")
                     .label("Option A")
@@ -324,7 +333,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-radio-2", p),
+                ElementId::named_usize("gallery-fc-radio-2", n),
                 150,
                 Radio::new("r2")
                     .label("Option B")
@@ -336,7 +345,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-radio-3", p),
+                ElementId::named_usize("gallery-fc-radio-3", n),
                 200,
                 Radio::new("r3")
                     .label("Option C")
@@ -348,79 +357,124 @@ impl Gallery {
             ),
         ];
 
-        self.section_wrapper(cx, "Switch / Checkbox / Radio", p, 3, cards)
+        self.section_wrapper(
+            cx,
+            "Switch / Checkbox / Radio",
+            "gallery-fc-section",
+            3,
+            cards,
+        )
     }
 
     fn render_slider(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-sl", self.replay_count);
         let cards = vec![Self::card(
             cx,
-            format!("{}-slider", p),
+            ElementId::named_usize("gallery-sl-slider", self.replay_count),
             0,
             Slider::new(&self.slider).w(px(200.)),
         )];
 
-        self.section_wrapper(cx, "Slider", p, 4, cards)
+        self.section_wrapper(cx, "Slider", "gallery-sl-section", 4, cards)
     }
 
     fn render_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-in", self.replay_count);
         let cards = vec![Self::card(
             cx,
-            format!("{}-input", p),
+            ElementId::named_usize("gallery-in-input", self.replay_count),
             0,
             Input::new(&self.input).w(px(220.)),
         )];
 
-        self.section_wrapper(cx, "Input", p, 5, cards)
+        self.section_wrapper(cx, "Input", "gallery-in-section", 5, cards)
     }
 
     fn render_progress_spinner(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-ps", self.replay_count);
+        let n = self.replay_count;
         let progress_val = self.progress_val;
-        let cards = vec![
+        let mut cards = vec![
             Self::card(
                 cx,
-                format!("{}-progress", p),
+                ElementId::named_usize("gallery-ps-progress", n),
                 0,
                 Progress::new("pg1").value(progress_val).w(px(200.)),
             ),
             Self::card(
                 cx,
-                format!("{}-circle", p),
+                ElementId::named_usize("gallery-ps-circle", n),
                 50,
                 ProgressCircle::new("pg2").value(progress_val).size_12(),
             ),
             Self::card(
                 cx,
-                format!("{}-circle-loading", p),
-                100,
-                ProgressCircle::new("pg3").loading(true).size_12(),
-            ),
-            Self::card(cx, format!("{}-spinner", p), 150, Spinner::new()),
-            Self::card(
-                cx,
-                format!("{}-spinner-lg", p),
-                200,
-                Spinner::new().large().color(cx.theme().blue),
-            ),
-            Self::card(
-                cx,
-                format!("{}-spinner-sm", p),
-                250,
-                Spinner::new().small().color(cx.theme().green),
+                ElementId::named_usize("gallery-ps-loading-toggle", n),
+                75,
+                Button::new("loading-toggle")
+                    .ghost()
+                    .label(if self.loading {
+                        "Stop loading"
+                    } else {
+                        "Simulate loading"
+                    })
+                    .on_click(cx.listener(move |v, _event, window, cx| {
+                        v.loading = !v.loading;
+                        if v.loading {
+                            // E1: 2.5s 后自动回到空闲并卸载 repeat() 组件，
+                            // 避免演示结束后仍满帧重绘。
+                            cx.spawn_in(window, async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(2500))
+                                    .await;
+                                _ = this.update_in(cx, |v, _window, cx| {
+                                    v.loading = false;
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        }
+                        cx.notify();
+                    })),
             ),
         ];
 
-        self.section_wrapper(cx, "Progress & Spinner", p, 6, cards)
+        // E1（Critical）: Spinner / loading ProgressCircle 内部是 `Animation::repeat()`
+        // （永不 done，C10）—— 常驻挂载会把窗口钉在满帧率重绘整个会话。
+        // 仅当 `loading == true` 时挂载；空闲（idle）时绝不挂载这些组件。
+        if self.loading {
+            cards.push(Self::card(
+                cx,
+                ElementId::named_usize("gallery-ps-circle-loading", n),
+                100,
+                ProgressCircle::new("pg3").loading(true).size_12(),
+            ));
+            cards.push(Self::card(
+                cx,
+                ElementId::named_usize("gallery-ps-spinner", n),
+                150,
+                Spinner::new(),
+            ));
+            cards.push(Self::card(
+                cx,
+                ElementId::named_usize("gallery-ps-spinner-lg", n),
+                200,
+                Spinner::new().large().color(cx.theme().blue),
+            ));
+            cards.push(Self::card(
+                cx,
+                ElementId::named_usize("gallery-ps-spinner-sm", n),
+                250,
+                Spinner::new().small().color(cx.theme().green),
+            ));
+        }
+
+        self.section_wrapper(cx, "Progress & Spinner", "gallery-ps-section", 6, cards)
     }
 
     fn render_tooltip_notification(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = format!("g{}-tn", self.replay_count);
+        let n = self.replay_count;
         let cards = vec![
             Self::card(
                 cx,
-                format!("{}-tooltip", p),
+                ElementId::named_usize("gallery-tn-tooltip", n),
                 0,
                 Button::new("tt1")
                     .label("Hover me")
@@ -428,7 +482,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-tooltip-icon", p),
+                ElementId::named_usize("gallery-tn-tooltip-icon", n),
                 50,
                 Button::new("tt2")
                     .ghost()
@@ -437,7 +491,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-notify", p),
+                ElementId::named_usize("gallery-tn-notify", n),
                 100,
                 Button::new("nt1")
                     .primary()
@@ -448,7 +502,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-notify-info", p),
+                ElementId::named_usize("gallery-tn-notify-info", n),
                 100,
                 Button::new("nt2")
                     .info()
@@ -462,7 +516,7 @@ impl Gallery {
             ),
             Self::card(
                 cx,
-                format!("{}-notify-success", p),
+                ElementId::named_usize("gallery-tn-notify-success", n),
                 150,
                 Button::new("nt3")
                     .success()
@@ -479,15 +533,15 @@ impl Gallery {
             ),
         ];
 
-        self.section_wrapper(cx, "Tooltip & Notification", p, 7, cards)
+        self.section_wrapper(cx, "Tooltip & Notification", "gallery-tn-section", 7, cards)
     }
 
     /// section 容器：标题 + 卡片网格，整体使用 SlideUp 动画入场。
     fn section_wrapper(
         &self,
         cx: &Context<Self>,
-        title: &str,
-        id_prefix: String,
+        title: &'static str,
+        id_base: &'static str,
         section_idx: usize,
         cards: Vec<AnyElement>,
     ) -> impl IntoElement {
@@ -500,14 +554,14 @@ impl Gallery {
             .w_full()
             .child(Self::section_title(cx, title))
             .child(h_flex().flex_wrap().gap_3().children(cards))
-            .slide_up(format!("{}-section-{}", id_prefix, section_idx), px(24.0))
+            // E3: 稳定基名 + replay_count（NamedInteger），替代 format! 造 id。
+            .slide_up(ElementId::named_usize(id_base, self.replay_count), px(24.0))
             .with_spec(spec)
     }
 }
 
 impl Render for Gallery {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let id_prefix = format!("gallery-{}", self.replay_count);
         let dark = self.dark;
 
         // 顶部标题栏
@@ -555,11 +609,17 @@ impl Render for Gallery {
                                 .icon(IconName::Play)
                                 .label("Replay")
                                 .on_click(cx.listener(move |v, _, _, cx| {
+                                    // E4: demo 惯用法 —— 换全部 ElementId 重放动画。
+                                    // 真实应用应保持稳定 id，只对变更的元素 re-notify，
+                                    // 而不是全局换 id 重挂所有动画。
                                     v.replay_count += 1;
                                     cx.notify();
                                 })),
                         )
-                        .fade_in(format!("{}-header-btns", id_prefix))
+                        .fade_in(ElementId::named_usize(
+                            "gallery-header-btns",
+                            self.replay_count,
+                        ))
                         .with_spec(replay_spec),
                 )
         };

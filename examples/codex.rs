@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, InteractiveElement, IntoElement, Render, SharedString, Styled, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Bounds, Context, ElementId, InteractiveElement, IntoElement, Render, SharedString, Styled,
+    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, Root, Sizable as _, Theme, ThemeMode, WindowExt as _,
@@ -107,10 +107,17 @@ struct ProjectItem {
 }
 
 struct CodexApp {
-    /// 每次点击 Replay 时递增，用于生成新的 ElementId 以重启动画
+    /// 每次点击 Replay 时递增，用于生成新的 ElementId 以重启动画。
+    ///
+    /// 注意（E4）：这是 demo 专属惯用法 —— 真实应用应保持稳定 id，
+    /// 只对变更的元素 re-notify，而不是全局换 id 重挂所有动画。
     replay_count: usize,
     dark: bool,
     right_panel_open: bool,
+    /// 是否处于"正在生成"状态：为 true 时才挂载打字指示器（含 `Spinner`）。
+    /// Spinner 是 `Animation::repeat()` 组件（永不 done，C10），常驻挂载会
+    /// 把整棵 codex 树钉在满帧率重绘；空闲时必须卸载（E2）。
+    working: bool,
     /// 入场动画使用 Spring 物理缓动（true）或传统 EaseOut（false）。
     use_spring: bool,
     /// 右侧面板的声明式生命周期动画状态。
@@ -149,6 +156,7 @@ impl CodexApp {
             replay_count: 0,
             dark: true,
             right_panel_open: true,
+            working: false,
             use_spring: true,
             right_panel_presence,
             right_panel_tab: RightPanelTab::Browser,
@@ -195,7 +203,7 @@ impl CodexApp {
 
     // —— 侧边栏（使用 cx.listener，需 &mut） ——
 
-    fn render_sidebar(&self, cx: &mut Context<Self>, id_prefix: &str) -> impl IntoElement {
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let active_nav = self.active_nav;
 
@@ -242,7 +250,8 @@ impl CodexApp {
         for (i, &item) in nav_items.iter().enumerate() {
             let active = active_nav == item;
             let row = h_flex()
-                .id(format!("nav-{}", i))
+                // E3: 稳定基名 + 下标（NamedInteger），替代每帧 format! 造 id。
+                .id(("nav", i))
                 .items_center()
                 .gap_2()
                 .px_2()
@@ -287,7 +296,7 @@ impl CodexApp {
         for (i, p) in self.projects.iter().enumerate() {
             projects_block = projects_block.child(
                 h_flex()
-                    .id(format!("proj-{}", i))
+                    .id(("proj", i))
                     .items_center()
                     .gap_2()
                     .px_2()
@@ -313,7 +322,7 @@ impl CodexApp {
         for (i, c) in self.chats.iter().enumerate() {
             chats_block = chats_block.child(
                 h_flex()
-                    .id(format!("chat-{}", i))
+                    .id(("chat", i))
                     .items_center()
                     .gap_2()
                     .px_2()
@@ -403,13 +412,16 @@ impl CodexApp {
 
         // 从左侧滑入
         sidebar
-            .slide_right(format!("{}-sidebar", id_prefix), px(40.))
+            .slide_right(
+                ElementId::named_usize("codex-sidebar", self.replay_count),
+                px(40.),
+            )
             .with_spec(AnimationSpec::default().with_duration(Duration::from_millis(450)))
     }
 
     // —— 主对话区（顶部栏使用 cx.listener，需 &mut；消息/composer 只读 theme） ——
 
-    fn render_main(&self, cx: &mut Context<Self>, id_prefix: &str) -> impl IntoElement {
+    fn render_main(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let dark = self.dark;
         let right_panel_open = self.right_panel_open;
@@ -497,17 +509,20 @@ impl CodexApp {
                                 .icon(IconName::Play)
                                 .label("Replay")
                                 .on_click(cx.listener(move |v, _, _, cx| {
+                                    // E4: demo 惯用法 —— 换全部 ElementId 重放动画。
+                                    // 真实应用应保持稳定 id，只对变更的元素 re-notify，
+                                    // 而不是全局换 id 重挂所有动画。
                                     v.replay_count += 1;
                                     cx.notify();
                                 })),
                         ),
                 )
-                .fade_in(format!("{}-topbar", id_prefix))
+                .fade_in(ElementId::named_usize("codex-topbar", self.replay_count))
                 .with_spec(spec)
         };
 
         // 消息流（只读 theme，不使用 cx.listener）
-        let messages = self.render_messages(cx, id_prefix);
+        let messages = self.render_messages(cx);
         let scroll = div()
             .id("codex-msg-scroll")
             .flex_1()
@@ -523,7 +538,7 @@ impl CodexApp {
             );
 
         // 底部 composer
-        let composer = self.render_composer(cx, id_prefix);
+        let composer = self.render_composer(cx);
 
         v_flex()
             .h_full()
@@ -536,13 +551,11 @@ impl CodexApp {
 
     // —— 消息流（只读，&Context） ——
 
-    fn render_messages(&self, cx: &Context<Self>, id_prefix: &str) -> impl IntoElement {
-        let p = id_prefix;
-
+    fn render_messages(&self, cx: &Context<Self>) -> impl IntoElement {
         // 第 1 条：用户消息
         let m1 = self.render_user_message(
             cx,
-            format!("{}-m1", p),
+            ElementId::named_usize("codex-m1", self.replay_count),
             0,
             "帮我重构 auth 模块，改成 async/await 风格，并加上错误处理。",
         );
@@ -554,23 +567,23 @@ impl CodexApp {
             Self::msg_code_block(
                 cx,
                 "src/auth.rs",
-                vec![
-                    "pub fn login(email: &str, password: &str) -> Result<User, AuthError> {",
-                    "    let user = db.find_user(email)?;",
-                    "    verify_password(&password, &user.password_hash)?;",
-                    "    Ok(user)",
-                    "}",
+                &[
+                    "pub fn login(email: &str, password: &str) -> Result<User, AuthError> {\n",
+                    "    let user = db.find_user(email)?;\n",
+                    "    verify_password(&password, &user.password_hash)?;\n",
+                    "    Ok(user)\n",
+                    "}\n",
                 ],
             ),
             Self::msg_tool_call(cx, "cargo check", true),
             Self::msg_diff(
                 cx,
                 "src/auth.rs",
-                vec![
-                    "- pub fn login(email: &str, password: &str) -> Result<User, AuthError> {",
-                    "+ pub async fn login(email: &str, password: &str) -> Result<User, AuthError> {",
-                    "-     let user = db.find_user(email)?;",
-                    "+     let user = db.find_user(email).await?;",
+                &[
+                    "- pub fn login(email: &str, password: &str) -> Result<User, AuthError> {\n",
+                    "+ pub async fn login(email: &str, password: &str) -> Result<User, AuthError> {\n",
+                    "-     let user = db.find_user(email)?;\n",
+                    "+     let user = db.find_user(email).await?;\n",
                 ],
             ),
             Self::msg_text(
@@ -578,15 +591,34 @@ impl CodexApp {
                 "改动很小：把 `db.find_user` 改成 `.await`，函数签名加 `async`。需要我顺手补一下测试吗？",
             ),
         ];
-        let m2 = self.render_assistant_block(cx, format!("{}-m2", p), 120, m2_children);
+        let m2 = self.render_assistant_block(
+            cx,
+            ElementId::named_usize("codex-m2", self.replay_count),
+            120,
+            m2_children,
+        );
 
         // 第 3 条：用户消息
-        let m3 = self.render_user_message(cx, format!("{}-m3", p), 520, "好的，顺便加上。");
+        let m3 = self.render_user_message(
+            cx,
+            ElementId::named_usize("codex-m3", self.replay_count),
+            520,
+            "好的，顺便加上。",
+        );
 
-        // 第 4 条：assistant 正在思考
-        let m4 = self.render_typing(cx, format!("{}-m4", p), 640);
-
-        v_flex().gap_6().child(m1).child(m2).child(m3).child(m4)
+        let mut messages = v_flex().gap_6().child(m1).child(m2).child(m3);
+        // E2（High）：第 4 条"正在思考"含 `Spinner`（`Animation::repeat()`，C10），
+        // 常驻挂载会把整棵 codex 树钉在满帧率重绘。仅当 working 时挂载，
+        // 生成完成（定时器）后卸载 —— 空闲时绝不挂载。
+        if self.working {
+            let m4 = self.render_typing(
+                cx,
+                ElementId::named_usize("codex-m4", self.replay_count),
+                640,
+            );
+            messages = messages.child(m4);
+        }
+        messages
     }
 
     /// 用户消息：右对齐气泡
@@ -595,7 +627,7 @@ impl CodexApp {
         cx: &Context<Self>,
         id: impl Into<gpui::ElementId>,
         delay_ms: u64,
-        text: &str,
+        text: &'static str,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let spec = AnimationSpec::default()
@@ -614,7 +646,8 @@ impl CodexApp {
                     .bg(theme.accent.opacity(0.16))
                     .text_color(theme.foreground)
                     .text_sm()
-                    .child(text.to_string()),
+                    // E3: &'static str 直接作文本元素，零分配，替代 to_string()。
+                    .child(text),
             )
             .slide_up(id, px(16.))
             .with_spec(spec)
@@ -713,26 +746,23 @@ impl CodexApp {
 
     // —— assistant 子元素工厂方法（只读 theme，&Context） ——
 
-    fn msg_text(cx: &Context<Self>, text: &str) -> gpui::AnyElement {
+    fn msg_text(cx: &Context<Self>, text: &'static str) -> gpui::AnyElement {
         let theme = cx.theme();
         div()
             .text_color(theme.foreground)
             .text_sm()
-            .child(text.to_string())
+            // E3: &'static str 零分配文本，替代 to_string()。
+            .child(text)
             .into_any_element()
     }
 
     /// 代码块：文件名 tab + 代码内容 + 复制按钮
-    fn msg_code_block(cx: &Context<Self>, file: &str, lines: Vec<&str>) -> gpui::AnyElement {
+    fn msg_code_block(
+        cx: &Context<Self>,
+        file: &'static str,
+        lines: &[&'static str],
+    ) -> gpui::AnyElement {
         let theme = cx.theme();
-        let code_lines = lines
-            .iter()
-            .map(|l| {
-                div()
-                    .child(SharedString::from(format!("{}\n", l)))
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
 
         v_flex()
             .w_full()
@@ -754,9 +784,11 @@ impl CodexApp {
                             .items_center()
                             .gap_2()
                             .child(Icon::new(IconName::File).xsmall())
-                            .child(div().text_xs().child(file.to_string())),
+                            .child(div().text_xs().child(file)),
                     )
                     .child(
+                        // E3: `file` 需拼接 "copy-" 前缀且非编译期常量，保留 format!
+                        // （每帧 1 次；换静态 id 需保证唯一性，风险更高）。
                         Button::new(format!("copy-{}", file))
                             .ghost()
                             .small()
@@ -773,13 +805,15 @@ impl CodexApp {
                     .font_family("monospace")
                     .text_xs()
                     .text_color(theme.foreground)
-                    .children(code_lines),
+                    // E3: 行文本在字面量中自带 "\n"，直接以 &'static str 渲染，
+                    // 不再 format!+SharedString 每帧造串，也不收集中间 Vec。
+                    .children(lines.iter().map(|l| div().child(*l))),
             )
             .into_any_element()
     }
 
     /// 工具调用卡片：图标 + 标题 + 命令 + 状态
-    fn msg_tool_call(cx: &Context<Self>, command: &str, done: bool) -> gpui::AnyElement {
+    fn msg_tool_call(cx: &Context<Self>, command: &'static str, done: bool) -> gpui::AnyElement {
         let theme = cx.theme();
         let status_icon: gpui::AnyElement = if done {
             Icon::new(IconName::CircleCheck)
@@ -828,6 +862,8 @@ impl CodexApp {
                     .font_family("monospace")
                     .text_xs()
                     .text_color(theme.foreground)
+                    // E3: 命令文本需拼接 `command`（非编译期常量），保留 format!
+                    // （每帧 1 次；拆成多个文本子节点会改变换行布局）。
                     .child(SharedString::from(format!(
                         "$ {}\n    Finished `dev` profile in 0.82s",
                         command
@@ -837,36 +873,12 @@ impl CodexApp {
     }
 
     /// diff 卡片：文件名 + 增删行（红 / 绿）
-    fn msg_diff(cx: &Context<Self>, file: &str, lines: Vec<&str>) -> gpui::AnyElement {
+    fn msg_diff(
+        cx: &Context<Self>,
+        file: &'static str,
+        lines: &[&'static str],
+    ) -> gpui::AnyElement {
         let theme = cx.theme();
-        let diff_lines = lines
-            .iter()
-            .map(|l| {
-                let is_add = l.starts_with('+');
-                let is_del = l.starts_with('-');
-                let line_bg = if is_add {
-                    theme.green.opacity(0.12)
-                } else if is_del {
-                    theme.red.opacity(0.12)
-                } else {
-                    gpui::transparent_black()
-                };
-                let line_fg = if is_add {
-                    theme.green
-                } else if is_del {
-                    theme.red
-                } else {
-                    theme.foreground
-                };
-                div()
-                    .px_3()
-                    .py_0p5()
-                    .bg(line_bg)
-                    .text_color(line_fg)
-                    .child(SharedString::from(format!("{}\n", l)))
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
 
         v_flex()
             .w_full()
@@ -884,25 +896,51 @@ impl CodexApp {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(Icon::new(IconName::File).xsmall())
-                    .child(div().text_xs().child(file.to_string())),
+                    .child(div().text_xs().child(file)),
             )
             .child(
                 v_flex()
                     .py_2()
                     .font_family("monospace")
                     .text_xs()
-                    .children(diff_lines),
+                    // E3: 行文本在字面量中自带 "\n"，直接以 &'static str 渲染，
+                    // 不再 format!+SharedString 每帧造串，也不收集中间 Vec。
+                    .children(lines.iter().map(|l| {
+                        let is_add = l.starts_with('+');
+                        let is_del = l.starts_with('-');
+                        let line_bg = if is_add {
+                            theme.green.opacity(0.12)
+                        } else if is_del {
+                            theme.red.opacity(0.12)
+                        } else {
+                            gpui::transparent_black()
+                        };
+                        let line_fg = if is_add {
+                            theme.green
+                        } else if is_del {
+                            theme.red
+                        } else {
+                            theme.foreground
+                        };
+                        div()
+                            .px_3()
+                            .py_0p5()
+                            .bg(line_bg)
+                            .text_color(line_fg)
+                            .child(*l)
+                    })),
             )
             .into_any_element()
     }
 
     // —— composer（只读，&Context；send 按钮用自由闭包而非 cx.listener） ——
 
-    fn render_composer(&self, cx: &Context<Self>, id_prefix: &str) -> impl IntoElement {
+    fn render_composer(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let spec = AnimationSpec::default()
             .with_delay(Duration::from_millis(600))
             .with_duration(Duration::from_millis(420));
+        let entity = cx.entity();
 
         let bar = h_flex()
             .items_end()
@@ -941,14 +979,35 @@ impl CodexApp {
                     .primary()
                     .icon(IconName::ArrowUp)
                     .tooltip("Send")
-                    .on_click(|_, window, cx| {
+                    .on_click(move |_, window, cx| {
                         window.push_notification("Codex is thinking…", cx);
+                        // E2: 挂载打字指示器（含 repeat() Spinner），2.6s 后自动
+                        // 卸载 —— 空闲时不挂载任何 repeat() 组件（C10）。
+                        entity.update(cx, |v, cx| {
+                            v.working = true;
+                            cx.notify();
+                        });
+                        let weak = entity.downgrade();
+                        window
+                            .spawn(cx, async move |cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(2600))
+                                    .await;
+                                _ = weak.update_in(cx, |v, _window, cx| {
+                                    v.working = false;
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                     }),
             );
 
         v_flex().px_6().pb_4().child(
-            bar.slide_up(format!("{}-composer", id_prefix), px(24.))
-                .with_spec(spec),
+            bar.slide_up(
+                ElementId::named_usize("codex-composer", self.replay_count),
+                px(24.),
+            )
+            .with_spec(spec),
         )
     }
 
@@ -982,7 +1041,8 @@ impl CodexApp {
             let active = active_tab == t;
             let tab_entity = entity.clone();
             let tab = h_flex()
-                .id(format!("tab-{}", i))
+                // E3: 稳定基名 + 下标（NamedInteger），替代每帧 format! 造 id。
+                .id(("tab", i))
                 .items_center()
                 .gap_1p5()
                 .px_2p5()
@@ -1145,7 +1205,8 @@ impl CodexApp {
         for (i, f) in files.iter().enumerate() {
             list = list.child(
                 h_flex()
-                    .id(format!("file-{}", i))
+                    // E3: 稳定基名 + 下标（NamedInteger），替代每帧 format! 造 id。
+                    .id(("file", i))
                     .items_center()
                     .gap_2()
                     .px_2()
@@ -1299,7 +1360,6 @@ impl CodexApp {
 
 impl Render for CodexApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let id_prefix = format!("codex-{}", self.replay_count);
         let right_panel_open = self.right_panel_open;
         let use_spring = self.use_spring;
 
@@ -1328,8 +1388,8 @@ impl Render for CodexApp {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_sidebar(cx, &id_prefix))
-            .child(self.render_main(cx, &id_prefix))
+            .child(self.render_sidebar(cx))
+            .child(self.render_main(cx))
             .child(self.right_panel_presence.clone())
     }
 }

@@ -62,7 +62,7 @@
 //!
 //! - **退场强制剥离 Spring**：退场规格经 [`AnimationSpec::without_spring`] 统一处理
 //!   （`Animated::new` / `Animated::with_exit` / `MotionLifecycle` 构造路径全覆盖），
-//!   保证退场曲线严格单调（I3）；若时长未被显式覆盖（等于 Spring 推荐时长）则重置为默认 200ms。
+//!   保证退场曲线严格单调（I3：退场曲线严格单调）；若时长未被显式覆盖（等于 Spring 推荐时长）则重置为默认 200ms。
 //! - **过渡期快照**：`PresenceState` 在状态转换瞬间捕获入场 / 退场动效与规格，
 //!   进行中的动画不受后续 [`PresenceState::set_lifecycle`] 影响；相等 lifecycle 调用直接短路。
 //! - **卸载宽限期**：退场动画结束后额外等待 50ms 再卸载元素，
@@ -71,11 +71,12 @@
 //!   冲突的既有样式（GPUI `Styled` refinement 不可移除、不可读回，属框架限制）；
 //!   建议将动画应用于包装元素。
 //! - **打断跳变**：GPUI `Animation` 不支持自定义起始进度，退场→入场 / 入场→退场
-//!   打断时存在一次可见跳变（S8，已知限制，无规避）。
+//!   打断时存在一次可见跳变（S8：打断跳变，已知限制，无规避）。
 //! - **Expand 重排成本**：`ExpandWidth` / `ExpandHeight` 每帧触发 taffy 子树重排与
-//!   文本重排版，大文本子树慎用（S10）。
-//! - **delay 重绘成本**：`delay` 折叠进缓动前缀，延迟期仍每帧重绘，长 delay（>300ms）
-//!   需知悉成本（S11）。
+//!   文本重排版（S10：Expand 每帧 taffy 重排，大文本子树慎用）。
+//! - **delay 期成本**：`delay` 折叠进缓动前缀，`AnimationElement` 在延迟期仍每帧 tick——
+//!   子树每帧全量重排（layout + paint）+ 驱动整窗重绘，长 delay（>300ms）
+//!   需知悉成本（S11：delay 期每帧重绘）。
 
 #![warn(missing_docs)]
 

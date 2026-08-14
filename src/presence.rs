@@ -19,10 +19,10 @@
 //! `exit_active.is_some() ⟺ closing`；`enter_active.is_some() ⟺ visible ∧ ¬closing`
 //! （render 中的防御性 `unwrap_or` 允许瞬时例外）。
 //!
-//! 已知限制（S8）：GPUI `Animation` 不支持自定义起始进度，退场→入场 / 入场→退场
+//! 已知限制（S8：打断跳变）：GPUI `Animation` 不支持自定义起始进度，退场→入场 / 入场→退场
 //! 打断时存在一次可见跳变。
 //!
-//! # 定时器宽限的接受边界（S7）
+//! # 定时器宽限的接受边界（S7：退场后延迟 50ms 卸载）
 //!
 //! - 卡帧 / 窗口 occluded 时元素不渲染，提前卸载不可见（无视觉影响）；
 //! - `reduce_motion` 下退场首帧即达隐藏态，此后以隐藏态挂载至定时器到期（无视觉影响）。
@@ -31,11 +31,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Context, Div, ElementId, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Task, Window, div, px,
+    Animation, App, AppContext, Context, Div, ElementId, Entity, IntoElement, ParentElement,
+    Render, SharedString, Styled, Task, Window, div, px,
 };
 
-use crate::{Animated, AnimationSpec, Motion, MotionLifecycle};
+use crate::animated::build_animation;
+use crate::{Animated, Motion, MotionLifecycle};
 
 /// 退场卸载定时器宽限期：动画结束后额外等待一段时间再卸载，
 /// 兜底 GPUI 在元素首次 layout 才打点 `AnimationState.start`（至多滞后一帧）。
@@ -96,9 +97,10 @@ pub struct PresenceState {
     /// 入场 / 退场动画配对。
     lifecycle: MotionLifecycle,
     /// 进行中过渡的入场快照（转换发生时捕获，不受后续 `set_lifecycle` 影响）。
-    enter_active: Option<(Motion, AnimationSpec)>,
+    /// 预构建 `Rc<Animation>`（P1 缓存），渲染期直接复用（P2）。
+    enter_active: Option<(Motion, Rc<Animation>)>,
     /// 进行中过渡的退场快照。
-    exit_active: Option<(Motion, AnimationSpec)>,
+    exit_active: Option<(Motion, Rc<Animation>)>,
     /// ID 基名（与 epoch 组合生成 `ElementId::NamedInteger`）。
     id: SharedString,
     /// 退场计时器，存储以便中断时取消。
@@ -196,8 +198,12 @@ impl PresenceState {
             // 入场的 ID 完全相同 → GPUI 缓存的 AnimationState 已是
             // delta=1.0 的完成态 → 面板"哐当"一下以全宽出现无动画。
             self.epoch += 1;
-            // 捕获本次入场的快照，进行中的过渡不受 set_lifecycle 影响（S6）。
-            self.enter_active = Some((self.lifecycle.enter, self.lifecycle.enter_spec));
+            // 捕获本次入场的快照（预构建 `Rc<Animation>`，P2），
+            // 进行中的过渡不受 set_lifecycle 影响（S6）。
+            self.enter_active = Some((
+                self.lifecycle.enter,
+                build_animation(self.lifecycle.enter_spec, false),
+            ));
             self.exit_active = None;
             if self.closing {
                 self.closing = false;
@@ -209,9 +215,12 @@ impl PresenceState {
             // 启动退场：递增 epoch 保证退场 ID（epoch*2+1 奇数）
             // 不与任何历史退场/入场 ID 冲突。
             self.epoch += 1;
-            // 捕获本次退场的快照（S6）。
+            // 捕获本次退场的快照（预构建 `Rc<Animation>`，reverse=true，P2）。
             self.enter_active = None;
-            self.exit_active = Some((self.lifecycle.exit, self.lifecycle.exit_spec));
+            self.exit_active = Some((
+                self.lifecycle.exit,
+                build_animation(self.lifecycle.exit_spec, true),
+            ));
             self.closing = true;
             // S7 宽限：定时器 = 快照退场时长 + delay + GRACE（兜底 C5 首帧滞后）。
             let exit_spec = self.lifecycle.exit_spec;
@@ -259,22 +268,39 @@ impl Render for PresenceState {
 
         if self.closing {
             // 退场：用奇数 epoch 避免与入场动画 ID 冲突（GPUI 会跳过已完成动画）。
-            // 优先读退场快照，`unwrap_or` 仅作防御性兜底。
+            // 优先读退场快照（预构建 `Rc<Animation>`，P2 直接复用，不再走
+            // `Animated::new` 构建路径）；`unwrap_or` 兜底仅作防御性路径。
             let id = ElementId::NamedInteger(id_base, (epoch * 2 + 1) as u64);
-            let (motion, spec) = self
-                .exit_active
-                .unwrap_or((self.lifecycle.exit, self.lifecycle.exit_spec));
-            Animated::new(child, id, spec, motion)
-                .exit()
+            let (motion, animation) = match &self.exit_active {
+                Some((motion, animation)) => (*motion, animation.clone()),
+                None => (
+                    self.lifecycle.exit,
+                    build_animation(self.lifecycle.exit_spec, true),
+                ),
+            };
+            Animated::from_animation(child, id, motion, self.lifecycle.exit_spec, animation, true)
                 .into_any_element()
         } else {
             // 入场：用偶数 epoch，每次重开都是新 ID。
-            // 优先读入场快照，`unwrap_or` 仅作防御性兜底。
+            // 优先读入场快照（预构建 `Rc<Animation>`，P2 直接复用）；
+            // `unwrap_or` 兜底仅作防御性路径。
             let id = ElementId::NamedInteger(id_base, (epoch * 2) as u64);
-            let (motion, spec) = self
-                .enter_active
-                .unwrap_or((self.lifecycle.enter, self.lifecycle.enter_spec));
-            Animated::new(child, id, spec, motion).into_any_element()
+            let (motion, animation) = match &self.enter_active {
+                Some((motion, animation)) => (*motion, animation.clone()),
+                None => (
+                    self.lifecycle.enter,
+                    build_animation(self.lifecycle.enter_spec, false),
+                ),
+            };
+            Animated::from_animation(
+                child,
+                id,
+                motion,
+                self.lifecycle.enter_spec,
+                animation,
+                false,
+            )
+            .into_any_element()
         }
     }
 }
@@ -282,6 +308,7 @@ impl Render for PresenceState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AnimationSpec;
     use gpui::{AppContext, Empty, TestAppContext};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -431,5 +458,88 @@ mod tests {
         assert!(!visible, "应按原 200ms 快照卸载");
         assert!(!closing);
         assert!(!has_task);
+    }
+
+    /// 手动驱动一帧 `render`（T19）：presence 渲染期应直接复用快照预构建动画。
+    fn render_frame(
+        cx: &mut TestAppContext,
+        presence: &Entity<PresenceState>,
+        window: &gpui::WindowHandle<Empty>,
+    ) {
+        cx.update_window(**window, |_, window, cx| {
+            presence.update(cx, |s, cx| {
+                let _ = s.render(window, cx).into_any_element();
+            });
+        })
+        .unwrap();
+    }
+
+    /// T19（P2）：presence 过渡期 render 复用快照预构建动画——同一
+    /// `Rc::ptr_eq` 且 `build_animation` 零调用（计数器断言）。
+    #[gpui::test]
+    async fn presence_does_not_rebuild_animation_mid_transition(cx: &mut TestAppContext) {
+        let (window, presence) = setup(cx, MotionLifecycle::fade(AnimationSpec::default()));
+
+        // 入场转换：快照在捕获瞬间构建一次，且即 P1 缓存对象
+        set_present(cx, &presence, &window, true);
+        let enter_snapshot = cx.update(|cx| {
+            presence
+                .read(cx)
+                .enter_active
+                .as_ref()
+                .map(|(_, animation)| Rc::clone(animation))
+                .expect("入场应捕获快照")
+        });
+        assert!(
+            Rc::ptr_eq(
+                &enter_snapshot,
+                &build_animation(AnimationSpec::default(), false)
+            ),
+            "入场快照应为 P1 缓存同一 Rc"
+        );
+
+        // 入场过渡期多帧 render：复用同一快照 Rc，零 build_animation 调用
+        crate::animated::reset_build_count();
+        for _ in 0..5 {
+            render_frame(cx, &presence, &window);
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            crate::animated::build_count(),
+            0,
+            "入场过渡期 render 不得再次调用 build_animation"
+        );
+
+        // 退场转换：快照同样即 P1 缓存对象（reverse=true）
+        set_present(cx, &presence, &window, false);
+        let exit_snapshot = cx.update(|cx| {
+            presence
+                .read(cx)
+                .exit_active
+                .as_ref()
+                .map(|(_, animation)| Rc::clone(animation))
+                .expect("退场应捕获快照")
+        });
+        assert!(
+            Rc::ptr_eq(
+                &exit_snapshot,
+                &build_animation(AnimationSpec::default(), true)
+            ),
+            "退场快照应为 P1 缓存同一 Rc"
+        );
+
+        // 退场过渡期多帧 render：同样零 build_animation 调用
+        crate::animated::reset_build_count();
+        for _ in 0..5 {
+            render_frame(cx, &presence, &window);
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            crate::animated::build_count(),
+            0,
+            "退场过渡期 render 不得再次调用 build_animation"
+        );
     }
 }
