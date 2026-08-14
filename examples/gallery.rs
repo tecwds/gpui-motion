@@ -7,6 +7,7 @@
 //! - Switch / Checkbox / Radio / Slider / Input
 //! - Progress / Tooltip / Notification
 //! - Motion Composition（Phase 1：颜色插值 / Keyframes / Stagger）
+//! - Loop & SpringValue（Phase 2：循环动效 / 数值弹簧）
 //! - 每个区块容器使用 SlideUp 入场，卡片内部使用 FadeIn 交错入场
 //! - 点击 Replay 重播全部动画；点击右上角按钮切换深/浅色主题
 
@@ -34,7 +35,10 @@ use gpui_component::{
     v_flex,
 };
 use gpui_component_assets::Assets;
-use gpui_component_motion::{AnimationSpec, Easing, Motion, MotionExt, MotionKeyframes, stagger};
+use gpui_component_motion::{
+    AnimationSpec, Easing, LoopKind, LoopMotion, Motion, MotionExt, MotionKeyframes, SpringPreset,
+    SpringValue, stagger,
+};
 use gpui_platform::application;
 
 struct Gallery {
@@ -49,6 +53,14 @@ struct Gallery {
     /// 这些组件内部是 `Animation::repeat()`（永不 done，C10），常驻挂载会把窗口
     /// 钉在满帧率重绘整个会话；空闲时必须卸载（E1）。
     loading: bool,
+    /// Phase 2（C7）: 循环动效开关 —— 仅 true 时挂载 LoopMotion。
+    /// 循环组件永不结束、每帧 tick，空闲（false）绝不挂载（E1/E2 教训）。
+    loop_on: bool,
+    /// Phase 2（D8）: 数值弹簧实体（Wobbly 预设，允许过冲）。
+    spring: gpui::Entity<SpringValue>,
+    /// D8: 弹簧 tick 的订阅句柄 —— 必须持有（Drop 即取消 observe），
+    /// 否则弹簧每帧 notify 无法驱动本 view 重绘。
+    _spring_sub: gpui::Subscription,
     // 交互状态
     switch_val: bool,
     checkbox_val: bool,
@@ -63,10 +75,17 @@ impl Gallery {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type something..."));
         let slider = cx.new(|_| SliderState::new().min(0.).max(100.).default_value(60.));
+        // Phase 2（D8）: 数值弹簧 —— 初始值 0，Wobbly 预设（明显振荡、可过冲）。
+        let spring = SpringValue::new(cx, 0.0, SpringPreset::Wobbly);
+        // 订阅弹簧每帧 notify，驱动本 view 重绘（否则显示值不会更新）。
+        let _spring_sub = cx.observe(&spring, |_, _, cx| cx.notify());
         Self {
             replay_count: 0,
             dark: false,
             loading: false,
+            loop_on: false,
+            spring,
+            _spring_sub,
             switch_val: true,
             checkbox_val: false,
             radio_val: 0,
@@ -626,6 +645,93 @@ impl Gallery {
         self.section_wrapper(cx, "Motion Composition", "gallery-mc-section", 8, cards)
     }
 
+    /// Loop & SpringValue（Phase 2）：循环动效 + 数值弹簧演示。
+    fn render_loop_spring(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let n = self.replay_count;
+
+        // —— 1) Loop 循环动效（C7 / LoopMotion）——
+        // E1/E2（Critical）: 循环组件永不结束、每帧 tick —— 空闲（loop_on == false）
+        // 绝不挂载，仅需循环效果时挂载；切换关闭即卸载（卸载即停，无后台残留）。
+        let loop_block: AnyElement = if self.loop_on {
+            // LoopKind::Pulse：平滑呼吸，透明度 0.4 → 1.0 → 0.4（900ms 周期；
+            // 等价于便捷构造 LoopMotion::pulse(div(), id, 900ms)）。
+            LoopMotion::new(
+                div()
+                    .w(px(120.))
+                    .h(px(80.))
+                    .rounded_lg()
+                    .bg(cx.theme().accent),
+                ElementId::named_usize("gallery-ls-loop-anim", n),
+                LoopKind::Pulse,
+                Duration::from_millis(900),
+            )
+            .into_any_element()
+        } else {
+            // 空闲：渲染静态块，不挂载任何循环动画。
+            div()
+                .w(px(120.))
+                .h(px(80.))
+                .rounded_lg()
+                .bg(cx.theme().accent)
+                .into_any_element()
+        };
+        let loop_card = Self::card(
+            cx,
+            ElementId::named_usize("gallery-ls-loop", n),
+            0,
+            v_flex().gap_3().items_center().child(loop_block).child(
+                Button::new("loop-toggle")
+                    .ghost()
+                    .label(if self.loop_on {
+                        "Stop pulsing"
+                    } else {
+                        "Start pulsing"
+                    })
+                    .on_click(cx.listener(move |v, _event, _window, cx| {
+                        // 循环组件永不结束：空闲不挂载，切换即挂载 / 卸载（卸载即停）。
+                        v.loop_on = !v.loop_on;
+                        cx.notify();
+                    })),
+            ),
+        );
+
+        // —— 2) SpringValue 数值弹簧（D8）——
+        // 渲染期每帧读取当前值（弹簧 tick 每帧 notify，经 _spring_sub 订阅驱动重绘）。
+        let spring_value = self.spring.read(cx).value();
+        let spring_card = Self::card(
+            cx,
+            ElementId::named_usize("gallery-ls-spring", n),
+            50,
+            v_flex()
+                .gap_3()
+                .items_center()
+                .child(
+                    div()
+                        .text_3xl()
+                        .text_color(cx.theme().foreground)
+                        // 单卡片值显示允许每帧 1 次 format!（E3 例外，demo 专用）。
+                        .child(format!("{:.0}", spring_value)),
+                )
+                .child(
+                    Button::new("spring-to-100")
+                        .primary()
+                        .label("Spring to 100")
+                        .on_click(cx.listener(move |v, _event, window, cx| {
+                            // D8: 声明目标值 —— Wobbly 预设从当前值起跳插值到 100（可过冲）。
+                            v.spring.update(cx, |s, cx| s.set_target(100.0, window, cx));
+                        })),
+                ),
+        );
+
+        self.section_wrapper(
+            cx,
+            "Loop & SpringValue",
+            "gallery-ls-section",
+            9,
+            vec![loop_card, spring_card],
+        )
+    }
+
     /// section 容器：标题 + 卡片网格，整体使用 SlideUp 动画入场。
     fn section_wrapper(
         &self,
@@ -725,7 +831,8 @@ impl Render for Gallery {
             .child(self.render_input(cx))
             .child(self.render_progress_spinner(cx))
             .child(self.render_tooltip_notification(cx))
-            .child(self.render_motion_composition(cx));
+            .child(self.render_motion_composition(cx))
+            .child(self.render_loop_spring(cx));
 
         let scroll_area = div()
             .id("gallery-scroll")

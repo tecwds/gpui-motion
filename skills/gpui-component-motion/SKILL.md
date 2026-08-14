@@ -24,6 +24,8 @@ Rust edition: **2024**. Crate name: `gpui-component-motion`.
 | `stagger` | `src/stagger.rs` | Free function (Phase 1 / B5): `stagger(Vec<Animated<T>>, gap)` → `Vec<Animated<T>>`, replaces element *i*'s delay with `gap * i` for cascading entry (duration / easing / spring preserved) |
 | `MotionLifecycle` | `src/lifecycle.rs` | Enter + exit animation pairing; presets: `fade` / `slide_*` / `expand_width` / `expand_height` |
 | `PresenceState` | `src/presence.rs` | Declarative presence container (state machine HIDDEN→ENTERING→VISIBLE→EXITING); auto-manages enter/exit timing and unmount |
+| `LoopMotion<T>` + `LoopKind` | `src/loop_motion.rs` | Looping effects (Phase 2 / C7): wraps an `IntoElement + Styled` element in a never-ending animation. `LoopKind::Pulse` (smooth parabola breath, opacity 0.4→1.0→0.4) / `LoopKind::Skeleton` (triangle-wave blink, 0.5→1.0→0.5, shimmer-ish). Convenience ctors `pulse` / `skeleton`; implements `IntoElement` + `ParentElement`; built on `repeat_synced` (shared App clock). **Never ends — must be conditionally mounted and unmounted when done (E1/E2).** |
+| `SpringValue` | `src/spring_value.rs` | Declarative numeric spring (Phase 2 / D8): `Entity<SpringValue>`; `new(cx, initial, preset)` → event-driven `set_target(target, window, cx)` → tick-driven interpolation at ~16ms (60fps) with per-frame `notify`; read `value()` / `target()` in render. Curve matches `SpringPreset` exactly (underdamped presets may overshoot; exact convergence at t≥1); mid-flight `set_target` redirects from the current value (no velocity continuity); same-target short-circuits. |
 
 ## Usage Patterns
 
@@ -206,6 +208,60 @@ let staggered = stagger(items, Duration::from_millis(80)); // 0 / 80 / 160ms
 
 > **Unique ids per item (E3)**: each staggered item is a sibling, so every item needs its own `ElementId`. Use a stable base name per item (e.g. `ElementId::named_usize("item-0", n)`) with the replay counter — never `format!` in render.
 
+### 7. Phase 2: LoopMotion & SpringValue (C7 / D8)
+
+**Loops must be mounted on demand (E1/E2).** `LoopMotion` wraps an element with a
+never-ending `repeat_synced` animation — while mounted it ticks every frame and pins the
+window to full-rate redraws for the whole session. Mount it only while the effect is
+needed (e.g. a `loading` / `pulsing` flag), unmount when done (**unmount = stop**; the
+animation state dies with the element), and never render it idle:
+
+```rust
+use std::time::Duration;
+use gpui_component_motion::{LoopKind, LoopMotion};
+use gpui::{div, Styled};
+
+// Mount only while needed; render a static element otherwise
+let block = if loading {
+    // Pulse: smooth breath, opacity 0.4 → 1.0 → 0.4
+    LoopMotion::pulse(
+        div().w(px(120.)).h(px(80.)).rounded_lg().bg(accent), // accent = theme accent
+        "pulse-card",
+        Duration::from_millis(900),
+    )
+} else {
+    div().w(px(120.)).h(px(80.)).rounded_lg().bg(accent)
+};
+```
+
+`LoopKind::Pulse` is a smooth parabola breath (0.4→1.0→0.4); `LoopKind::Skeleton` is a
+triangle-wave blink (0.5→1.0→0.5, shimmer-ish — GPUI has no gradient-position styles
+yet). Both modulate the wrapped element's overall opacity (children included). Loops run
+on `repeat_synced`, sharing the App clock with all other synced loops (one frame schedule).
+
+**`SpringValue` is a declarative numeric spring.** Create the `Entity` once, declare
+targets on events, read the interpolated value in render:
+
+```rust
+use gpui_component_motion::{SpringPreset, SpringValue};
+
+// Create once: initial 0, Wobbly preset (pronounced overshoot)
+let value = SpringValue::new(cx, 0.0, SpringPreset::Wobbly);
+
+// Event-driven: spring interpolates from the current value to 100
+value.update(cx, |s, cx| s.set_target(100.0, window, cx));
+
+// In render (every frame, tick-driven notify):
+let current = value.read(cx).value();
+```
+
+- Interpolation follows the `SpringPreset` curve exactly (`from + (to-from) * progress(t)`)
+  — underdamped presets may overshoot mid-flight; `t ≥ 1` converges exactly (no residual).
+- Mid-flight `set_target` redirects from the current value (`from = current`); the old tick
+  task is dropped and a generation guard ignores stale ticks. No velocity continuity.
+- Same-target calls short-circuit (no new task, no notify).
+- Read `value()` / `target()` only in render; never call `set_target` from render.
+
 ## Critical Constraints
 
 These are hard-won lessons. Violating them causes visual bugs (instant appear/disappear,
@@ -234,6 +290,12 @@ layout jumps, stale animation state).
 
 7. **Child builder closure must capture `WeakEntity`, not `Entity`** — avoids reference
    cycles. The closure is `Rc<dyn Fn>` (called every frame), not `FnOnce`.
+
+8. **Infinite loops must be conditionally mounted (E1/E2)** — `LoopMotion` (and any
+   `repeat_synced` / `repeat()` element) never ends and ticks every frame while mounted,
+   pinning the window to full-rate redraws for the whole session. Mount only while the
+   effect is needed (state flag), unmount to stop (unmount = stop; state dies with the
+   element), and never render it idle.
 
 ## Common Pitfalls
 

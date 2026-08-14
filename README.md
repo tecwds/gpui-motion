@@ -292,6 +292,76 @@ let items = vec![
 let staggered = stagger(items, Duration::from_millis(80));
 ```
 
+## 循环动效与数值弹簧（Phase 2）
+
+Phase 2 新增两组能力：永不结束的循环动效（`LoopMotion`，C7）与声明式数值弹簧
+（`SpringValue`，D8）。二者互不依赖，可独立使用。
+
+### 循环动效（LoopMotion）
+
+`LoopMotion` 为元素挂载一个永不结束的循环动画，基于 GPUI `repeat_synced`
+（相位锁到 App 共享时钟，所有循环由同一次帧调度驱动），作用于元素整体透明度（含子元素）：
+
+| 预设 | 波形 | 透明度曲线 | 适用场景 |
+|------|------|-----------|---------|
+| `LoopKind::Pulse` | 抛物线（平滑呼吸） | 0.4 → 1.0 → 0.4 | 进行中 / 待机提示、呼吸强调 |
+| `LoopKind::Skeleton` | 三角波（闪烁） | 0.5 → 1.0 → 0.5 | 骨架屏占位（近似 shimmer） |
+
+```rust
+use std::time::Duration;
+use gpui_component_motion::{LoopKind, LoopMotion};
+use gpui::{div, px, Styled};
+
+// Pulse 平滑呼吸：透明度 0.4 → 1.0 → 0.4（900ms 周期）
+let pulse = LoopMotion::pulse(
+    div().w(px(120.)).h(px(80.)).rounded_lg().bg(hsla(0.6, 0.9, 0.5, 1.0)),
+    "pulse-demo",
+    Duration::from_millis(900),
+);
+
+// Skeleton 骨架屏闪烁：透明度 0.5 → 1.0 → 0.5（800ms 周期）
+let skeleton = LoopMotion::skeleton(
+    div().child("placeholder"),
+    "skeleton-demo",
+    Duration::from_millis(800),
+);
+```
+
+> **⚠️ 必须条件挂载（E1/E2）**：`repeat_synced` 循环**永不结束、每帧 tick** —— 只要
+> 元素保持挂载，窗口就会以满刷新率持续重绘整个会话（对照「性能」节：常驻 `repeat()`
+> 组件钉住整窗满帧重绘）。请**按需挂载**：用状态标志（如 `loading` / `pulsing`）
+> 条件挂载，效果结束时立即卸载 —— **卸载即停**，动画状态随元素销毁，无后台残留；
+> 空闲时不挂载。Skeleton 为近似 shimmer 的三角波闪烁（GPUI 暂无渐变位置样式，
+> 真 shimmer 留待上游支持）。
+
+### 数值弹簧（SpringValue）
+
+`SpringValue` 是一个 `Entity<SpringValue>`：调用方只声明"数值应当变成多少"
+（`set_target`），内部以 16ms ≈ 60fps 的固定帧率驱动插值，每帧 `notify` 订阅者，
+由订阅者在 render 中读取 `value()` 渲染。典型用途：数字滚动 / 计数器、进度条与
+加载指示器、开关滑块回弹、图表数据点过渡。
+
+```rust
+use gpui_component_motion::{SpringPreset, SpringValue};
+
+// 一次创建：初始值 0，Wobbly 预设（明显振荡、可过冲）
+let value = SpringValue::new(cx, 0.0, SpringPreset::Wobbly);
+
+// 事件驱动：声明新目标 —— 弹簧从当前值插值到 100
+value.update(cx, |s, cx| s.set_target(100.0, window, cx));
+
+// render 中读取当前值（渲染期只读；每帧 tick notify 驱动重绘）
+let current = value.read(cx).value();
+```
+
+- **与 `SpringPreset` 曲线完全一致**：插值为 `from + (to - from) * progress(t)`，
+  `t ≥ 1` 精确收敛到目标值（无残差）；欠阻尼预设（Default / Gentle / Wobbly）
+  中间允许过冲（瞬时值可越出 `[min(from, to), max(from, to)]`）。
+- **重定向从当前值起跳**：动画中途再次 `set_target` 时 `from = current`
+  （不做速度衔接），旧 tick 任务被丢弃，世代守卫防止过期 tick 污染新动画。
+- **短路**：目标未变且无进行中动画时不启动新 tick、不 `notify`。
+- 渲染端每帧读取 `value()`，勿在 render 内调用 `set_target`。
+
 ## 已知限制
 
 - **打断跳变（S8）**：GPUI `Animation` 不支持自定义起始进度，退场→入场 / 入场→退场
@@ -320,6 +390,9 @@ let staggered = stagger(items, Duration::from_millis(80));
   等基于 `Animation::repeat()` 的组件永不结束，每帧请求下一帧，驱动窗口以满刷新率持续
   重绘**整个会话**（空闲也烧满 CPU/GPU）。请用状态标志（如 `loading`）条件挂载，
   完成后立即卸载，空闲时不展示。
+- **`LoopMotion` 循环同属"永不结束"族（E1/E2）**：`repeat_synced` 循环同样每帧
+  tick，常驻挂载会钉住整窗满帧重绘 —— 必须用状态标志条件挂载，卸载即停
+  （见「循环动效与数值弹簧（Phase 2）」节与 gallery 演示）。
 - **`delay` 会延长重绘窗口**：`delay` 折叠进缓动前缀，`AnimationElement` 在延迟期仍每帧
   tick——子树每帧全量重排（layout + paint）+ 驱动整窗重绘。长 delay（>300ms）需知悉成本。
 - **render 保持零分配**：render 每帧执行，其中的任何堆分配都是每帧成本。避免在 render
