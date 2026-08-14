@@ -1,6 +1,6 @@
 ---
 name: "gpui-component-motion"
-description: "Guides adding animations to gpui-component UIs via MotionExt, PresenceState, and Spring physics. Invoke when adding entry/exit animations, panel transitions, or motion effects to GPUI elements."
+description: "Guides adding animations to gpui-component UIs via MotionExt, PresenceState/PresenceSet, Spring physics, keyframes, stagger, loops, spring values, drag springs, and MotionTokens presets. Invoke when adding entry/exit animations, panel transitions, list/tab enter-exit, loading loops, animated numbers, draggable elements, or motion effects to GPUI elements."
 ---
 
 # gpui-component-motion
@@ -8,7 +8,7 @@ description: "Guides adding animations to gpui-component UIs via MotionExt, Pres
 Non-intrusive animation layer for [gpui-component](https://github.com/longbridge/gpui-component).
 Built on top of GPUI's `with_animation` primitive.
 
-Rust edition: **2024**. Crate name: `gpui-component-motion`.
+Rust edition: **2024**. Crate name: `gpui-component-motion` (**v0.1.1**).
 
 ## Core API Map
 

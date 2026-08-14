@@ -1,20 +1,28 @@
 # gpui-component-motion
 
-为 [gpui-component](https://github.com/longbridge/gpui-component) 提供的非侵入式动画层。
+为 [gpui-component](https://github.com/longbridge/gpui-component) 提供的非侵入式动画层（v0.1.1）。
 
-在 GPUI 的 `with_animation` 基座之上封装了预设动效（Fade / Slide / ExpandWidth / ExpandHeight）、
-Spring 物理缓动、声明式生命周期容器（PresenceState）与元素扩展 trait（MotionExt），
+在 GPUI 的 `with_animation` 基座之上封装了 10 种预设动效（Fade / Slide×4 / Expand×2 / 颜色插值×3）、
+Spring 物理缓动、多段关键帧（MotionKeyframes）、级联入场（stagger）、循环动效（LoopMotion）、
+声明式数值弹簧（SpringValue）、手势驱动弹簧（DragSpring）、单 / 多子元素生命周期容器
+（PresenceState / PresenceSet）、零配置动效令牌（MotionTokens）与元素扩展 trait（MotionExt），
 让组件的入场 / 退场动画只需一行链式调用即可接入，无需手动管理 `Animation` 状态。
 
 ## 特性
 
 - **非侵入式**：通过 blanket impl 的 `MotionExt` trait 为所有 `IntoElement + Styled` 类型添加动画方法，不修改原有组件代码。
-- **入场 + 退场配对**：`MotionLifecycle` 描述元素的 mount / unmount 动效，`PresenceState` 自动管理时序与卸载。
+- **入场 + 退场配对**：`MotionLifecycle` 描述元素的 mount / unmount 动效，`PresenceState` / `PresenceSet` 自动管理时序与卸载（单 / 多子元素）。
 - **Spring 物理动画**：基于阻尼振荡方程的 `SpringPreset`（Stiff / Default / Gentle / Wobbly），支持过冲效果，比传统二次曲线更自然。**退场强制剥离 Spring**（任何构造路径），保证退场曲线严格单调。
 - **布局动画**：`ExpandWidth` / `ExpandHeight` 驱动元素尺寸从 0 到目标值渐变，适用于面板展开 / 折叠 / dropdown / accordion。
+- **颜色插值（Phase 1）**：`BackgroundColor` / `TextColor` / `BorderColor` 在 HSL 空间插值（色相走最短路径），悬停 / 选中 / 主题切换渐入渐出。
+- **多段关键帧 + 级联（Phase 1）**：`MotionKeyframes` 按比例拆分总时长顺序播放多段动效；`stagger` 为列表元素按索引递增延迟实现级联入场。
+- **循环动效（Phase 2）**：`LoopMotion`（Pulse / Skeleton）基于 `repeat_synced` 共享时钟，需按需挂载、卸载即停。
+- **数值 / 手势弹簧（Phase 2/3）**：`SpringValue` 声明式数值弹簧（数字滚动、进度条、图表）；`DragSpring` 拖拽跟手 + 松手回弹。
+- **多子元素进出（Phase 3）**：`PresenceSet` 按 key 管理任意数量 child 的独立进出生命周期（每 key 沿用 S5/S6/S7 语义）。
+- **零配置令牌（Phase 4）**：`MotionTokens` 把「组件 → 动效配对」固化为命名预设（panel / tooltip / modal / notification / dropdown / toast）。
 - **reduce_motion 友好**：内部复用 GPUI `AnimationElement`，系统启用减弱动画时自动渲染结束帧。
-- **低分配**：`Easing` / `SpringPreset` / `AnimationSpec` / `Motion` 均为 `Copy`；`Animation` 在 builder 阶段预构建，渲染期仅浅拷贝 `Rc`（每帧仅剩 `with_animation` 签名强制的一次 `Box` 分配）。
-- **`ParentElement` 支持**：`Animated<T>` 实现 `ParentElement`，可对其直接 `.child(...)` / `.children(...)`。
+- **低分配**：`Easing` / `SpringPreset` / `AnimationSpec` / `Motion` 均为 `Copy`；`Animation` 按规格键做线程本地 `Rc` 缓存（上限 128 条），渲染期仅浅拷贝 `Rc`（每帧仅剩 `with_animation` 签名强制的一次 `Box` 分配）。
+- **`ParentElement` 支持**：`Animated<T>` / `MotionKeyframes<T>` / `LoopMotion<T>` 实现 `ParentElement`，可对其直接 `.child(...)` / `.children(...)`。
 
 ## 快速上手
 
@@ -179,11 +187,18 @@ EXITING ──定时器到期但 epoch 不匹配──▶ 忽略（无副作用�
 | [`Easing`](src/easing.rs) | 传统缓动曲线（Linear / EaseIn / EaseOut / EaseInOut），输出 ∈ [0, 1] |
 | [`SpringPreset`](src/easing.rs) | Spring 物理缓动（Stiff / Default / Gentle / Wobbly），基于阻尼振荡闭式解，输出可 > 1（过冲） |
 | [`AnimationSpec`](src/spec.rs) | 时长 + 延迟 + 缓动 + Spring，含 `fast` / `default` / `slow` 预设与 `with_spring` builder |
-| [`Motion`](src/motion.rs) | 预设动效（Fade / SlideUp / SlideDown / SlideLeft / SlideRight / ExpandWidth / ExpandHeight） |
+| [`Motion`](src/motion.rs) | 预设动效（Fade / Slide×4 / Expand×2 / 颜色插值×3），`apply` 内钳制输入（I8） |
 | [`Animated<T>`](src/animated.rs) | 元素包装器，实现 `IntoElement`，预设起始态、Spring 物理映射、委托 GPUI 动画 |
 | [`MotionExt`](src/ext.rs) | blanket impl，为 `IntoElement + Styled` 提供链式快捷方法 |
 | [`MotionLifecycle`](src/lifecycle.rs) | 入场 / 退场动效配对，含 `expand_width` / `expand_height` / `fade` / `slide_*` 预设 |
-| [`PresenceState`](src/presence.rs) | 声明式生命周期容器，自动管理入场 / 退场时序与卸载，支持 `set_lifecycle` 运行时切换 |
+| [`PresenceState`](src/presence.rs) | 单子元素声明式生命周期容器，自动管理入场 / 退场时序与卸载，支持 `set_lifecycle` 运行时切换 |
+| [`MotionKeyframes<T>`](src/keyframes.rs) + [`Keyframe`](src/keyframes.rs) | 多段关键帧：按 `ratio` 权重拆分总时长顺序播放（每段 ≥1ms、末段吸收余数）（Phase 1，B4） |
+| [`stagger`](src/stagger.rs) | 级联入场：第 `i` 个元素延迟 `gap * i`（Phase 1，B5） |
+| [`LoopMotion<T>`](src/loop_motion.rs) + [`LoopKind`](src/loop_motion.rs) | 循环动效（Pulse / Skeleton），基于 `repeat_synced` 共享时钟，需条件挂载（Phase 2，C7） |
+| [`SpringValue`](src/spring_value.rs) | 声明式数值弹簧 Entity，tick 驱动插值 + notify（Phase 2，D8） |
+| [`PresenceSet`](src/presence_set.rs) | 多 key 声明式进出容器，每 key 独立 S5/S6/S7 生命周期，退场完成自动移除（Phase 3，E10） |
+| [`DragSpring`](src/drag.rs) | 手势驱动弹簧：拖拽跟手 + 松手回弹（Phase 3，D9） |
+| [`MotionTokens`](src/tokens.rs) | 零配置动效令牌：panel / tooltip / modal / notification / dropdown / toast（Phase 4，F12） |
 
 ## 预设动效
 
