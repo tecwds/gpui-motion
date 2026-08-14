@@ -12,7 +12,8 @@
 //! - Phase 1：badge 文字色插值（TextColor）、用户气泡背景色插值（BackgroundColor）、
 //!   assistant 区块关键帧（MotionKeyframes）、Files 列表 stagger 级联
 //! - Phase 2：打字指示器气泡 LoopMotion 呼吸；Summary tokens SpringValue 计数
-//! - Phase 3：右侧面板 tab 内容 PresenceSet 进出场；Browser CTA 卡片 DragSpring 拖拽回弹
+//! - Phase 3：右侧面板 tab 内容横向滑动切换（向右切从右滑入 / 向左切从左滑入，
+//!   单元素即时切换，无叠层无间隙）；Browser CTA 卡片 DragSpring 拖拽回弹
 //! - Phase 4：右侧面板入场用 MotionTokens::panel 令牌
 //! - 点击 Replay 重播全部动画；右上角按钮切换深/浅主题、开/关右侧面板
 
@@ -32,7 +33,7 @@ use gpui_component::{
 use gpui_component_assets::Assets;
 use gpui_component_motion::{
     AnimationSpec, DragSpring, Easing, LoopMotion, Motion, MotionExt, MotionKeyframes,
-    MotionLifecycle, MotionTokens, PresenceSet, PresenceState, SpringPreset, SpringValue, stagger,
+    MotionLifecycle, MotionTokens, PresenceState, SpringPreset, SpringValue, stagger,
 };
 use gpui_platform::application;
 
@@ -67,13 +68,16 @@ impl RightPanelTab {
             RightPanelTab::Summary => IconName::Inspector,
         }
     }
-    /// Phase 3（E10）/ PresenceSet：tab 对应的 key 字符串（进出场条目标识）。
-    fn key(self) -> &'static str {
+    /// 横向 tab 的顺序索引（Browser → Files → Terminal → Summary）。
+    ///
+    /// 用于计算切换方向：向右切换（新 tab 索引更大）时新内容从右侧滑入，
+    /// 向左切换时从左侧滑入（横向 tab → 内容左右滑动）。
+    fn index(self) -> usize {
         match self {
-            RightPanelTab::Browser => "browser",
-            RightPanelTab::Files => "files",
-            RightPanelTab::Terminal => "terminal",
-            RightPanelTab::Summary => "summary",
+            RightPanelTab::Browser => 0,
+            RightPanelTab::Files => 1,
+            RightPanelTab::Terminal => 2,
+            RightPanelTab::Summary => 3,
         }
     }
 }
@@ -141,10 +145,14 @@ struct CodexApp {
     tokens: gpui::Entity<SpringValue>,
     /// D8: 弹簧每帧 tick notify —— 订阅驱动本 view 重绘（Drop 即取消 observe）。
     _tokens_sub: gpui::Subscription,
-    /// Phase 3（E10）：右侧面板 4 个 tab 内容按 key 管理进出场（PresenceSet）。
-    tabs_presence: gpui::Entity<PresenceSet>,
-    /// E10: PresenceSet 内部 notify 的订阅句柄。
-    _tabs_sub: gpui::Subscription,
+    /// tab 内容切换计数：每次切换递增并编入 ElementId，触发新内容横向滑动入场。
+    ///
+    /// 注：tab 内容切换不用 PresenceSet —— 其条目按正常流叠放，退场 + 入场
+    /// 同帧会出现双内容垂直堆叠（布局跳动、卡顿感），且退场宽限拉长间隙；
+    /// tab 内容应为单元素即时切换（见 render_right_panel_inner）。
+    tab_switch_count: usize,
+    /// 本次切换方向：+1 向右（新内容从右滑入）/ -1 向左（新内容从左滑入）。
+    tab_direction: i8,
     /// Phase 3（D9）：Browser CTA 卡片的手势弹簧 —— 拖拽期追赶指针，松手回弹 0。
     drag: gpui::Entity<DragSpring>,
     /// D9: 按下时记录的指针起点（窗口坐标换算拖拽位移）。
@@ -185,24 +193,8 @@ impl CodexApp {
         // D8: 弹簧 tick 每帧 notify —— 订阅驱动本 view 重绘。
         let _tokens_sub = cx.observe(&tokens, |_, _, cx| cx.notify());
 
-        // Phase 3（E10）：右侧面板 tab 内容按 key 管理进出场（tooltip 配对）。
-        // builder 捕获 WeakEntity 读取最新状态，按 key 分发到具体 tab 内容。
-        let weak_tabs = cx.entity().downgrade();
-        let tabs_presence = PresenceSet::new(
-            cx,
-            MotionTokens::tooltip().lifecycle(),
-            move |key, window, cx| {
-                if let Some(strong) = weak_tabs.upgrade() {
-                    strong
-                        .read(cx)
-                        .render_panel_content(strong.clone(), key, window, cx)
-                } else {
-                    div()
-                }
-            },
-        );
-        // E10: set_present / 退场定时器都会 notify PresenceSet —— 订阅驱动本 view 重绘。
-        let _tabs_sub = cx.observe(&tabs_presence, |_, _, cx| cx.notify());
+        // tab 内容切换：单元素即时切换 + 横向滑动（方向由 tab_direction 决定），
+        // 无 PresenceSet 叠层 / 退场等待 —— 见 struct 字段说明与 render_right_panel_inner。
 
         // Phase 3（D9）：CTA 卡片拖拽弹簧 —— 初始值 0，Default 预设（轻微阻尼跟手）。
         let drag = DragSpring::new(cx, 0.0, SpringPreset::Default);
@@ -219,8 +211,8 @@ impl CodexApp {
             right_panel_tab: RightPanelTab::Browser,
             tokens,
             _tokens_sub,
-            tabs_presence,
-            _tabs_sub,
+            tab_switch_count: 0,
+            tab_direction: 0,
             drag,
             drag_start_x: 0.0,
             _drag_sub,
@@ -1161,21 +1153,15 @@ impl CodexApp {
                 .cursor_pointer()
                 .child(Icon::new(t.icon()).xsmall())
                 .child(div().text_xs().child(t.label()))
-                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _window, cx| {
                     tab_entity.update(cx, |v, cx| {
+                        let old = v.right_panel_tab;
+                        // 横向 tab → 内容左右滑动：向右切换（新 tab 索引更大）时
+                        // 新内容从右侧滑入，向左切换时从左侧滑入。
+                        v.tab_direction =
+                            (t.index() as isize - old.index() as isize).signum() as i8;
                         v.right_panel_tab = t;
-                        // Phase 3（E10）/ PresenceSet：切换 tab 时对 4 个 key 声明
-                        // 期望状态 —— 新 tab 入场、其余退场（退场完成自动移除条目）。
-                        v.tabs_presence.update(cx, |s, cx| {
-                            for tab in [
-                                RightPanelTab::Browser,
-                                RightPanelTab::Files,
-                                RightPanelTab::Terminal,
-                                RightPanelTab::Summary,
-                            ] {
-                                s.set_present(tab.key(), tab == t, window, cx);
-                            }
-                        });
+                        v.tab_switch_count += 1;
                         cx.notify();
                     });
                 });
@@ -1196,6 +1182,34 @@ impl CodexApp {
                 }),
         );
 
+        // 内容区：单元素即时切换 —— 旧内容直接替换，新内容按切换方向横向滑动
+        // 入场（无叠层、无退场等待，无间隙无卡顿）。首帧（tab_switch_count == 0）
+        // 不滑动（面板本身已有 PresenceState expand 入场动画）。
+        let content: gpui::Div = match active_tab {
+            RightPanelTab::Browser => self.render_panel_browser(entity, cx),
+            RightPanelTab::Files => self.render_panel_files(cx),
+            RightPanelTab::Terminal => self.render_panel_terminal(cx),
+            RightPanelTab::Summary => self.render_panel_summary(cx),
+        };
+        let content: gpui::AnyElement = if self.tab_switch_count == 0 {
+            content.into_any_element()
+        } else {
+            let motion = if self.tab_direction >= 0 {
+                // 向右切换（如 Browser→Files）：新内容从右侧滑入（left: +offset → 0）
+                Motion::SlideLeft(px(28.))
+            } else {
+                // 向左切换（如 Files→Browser）：新内容从左侧滑入
+                Motion::SlideRight(px(28.))
+            };
+            content
+                .with_motion(
+                    ElementId::named_usize("codex-tab-content", self.tab_switch_count),
+                    AnimationSpec::default().with_duration(Duration::from_millis(220)),
+                    motion,
+                )
+                .into_any_element()
+        };
+
         let panel = v_flex()
             .h_full()
             .w(px(340.))
@@ -1209,29 +1223,10 @@ impl CodexApp {
                     .id("panel-content-scroll")
                     .flex_1()
                     .overflow_y_scroll()
-                    // Phase 3（E10）/ PresenceSet：内容区按 key 管理进出场
-                    //（切换 tab 时旧内容退场、新内容入场）。
-                    .child(self.tabs_presence.clone()),
+                    .child(content),
             );
 
         panel
-    }
-
-    /// 右侧面板内容区：PresenceSet builder 按 key 分发到具体 tab 内容。
-    fn render_panel_content(
-        &self,
-        entity: gpui::Entity<Self>,
-        key: &SharedString,
-        _window: &mut Window,
-        cx: &App,
-    ) -> gpui::Div {
-        match key.as_ref() {
-            "browser" => self.render_panel_browser(entity, cx),
-            "files" => self.render_panel_files(cx),
-            "terminal" => self.render_panel_terminal(cx),
-            "summary" => self.render_panel_summary(cx),
-            _ => div(),
-        }
     }
 
     /// 右侧面板 - Browser 内容：模拟内嵌浏览器（CTA 卡片可拖拽，Phase 3）
@@ -1585,20 +1580,6 @@ impl Render for CodexApp {
         self.right_panel_presence.update(cx, |s, presence_cx| {
             s.set_lifecycle(lifecycle, presence_cx);
             s.set_present(right_panel_open, window, presence_cx);
-        });
-
-        // Phase 3（E10）/ PresenceSet：每帧同步 4 个 tab key 的期望状态
-        //（短路幂等；初始仅 Browser，切换时旧 tab 退场、新 tab 入场）。
-        let active_tab = self.right_panel_tab;
-        self.tabs_presence.update(cx, |s, presence_cx| {
-            for tab in [
-                RightPanelTab::Browser,
-                RightPanelTab::Files,
-                RightPanelTab::Terminal,
-                RightPanelTab::Summary,
-            ] {
-                s.set_present(tab.key(), tab == active_tab, window, presence_cx);
-            }
         });
 
         h_flex()
