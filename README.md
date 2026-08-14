@@ -196,6 +196,9 @@ EXITING ──定时器到期但 epoch 不匹配──▶ 忽略（无副作用�
 | `SlideRight(offset)` | left: -offset → 0 | left: 0 → -offset | 从左侧滑入（左侧面板） |
 | `ExpandWidth(max)` | width: 0 → max | width: max → 0 | 水平面板展开 / 收起 |
 | `ExpandHeight(max)` | height: 0 → max | height: max → 0 | 垂直折叠（dropdown / accordion / collapse） |
+| `BackgroundColor(from, to)` | 背景色 from → to | 背景色 to → from | 强调色渐变（如红→蓝）、状态着色 |
+| `TextColor(from, to)` | 文字色 from → to | 文字色 to → from | 文字高亮、状态文字变色 |
+| `BorderColor(from, to)` | 边框色 from → to | 边框色 to → from | 选中 / 校验状态的边框高亮 |
 
 ## 动画规格预设
 
@@ -222,6 +225,72 @@ EXITING ──定时器到期但 epoch 不匹配──▶ 忽略（无副作用�
 > （仍等于该预设的推荐时长），剥离后自动重置为默认 200ms；显式时长则保留。
 > 剥离逻辑封装为公开方法 `AnimationSpec::without_spring()`，手动构造场景亦可复用。
 > 如需更长的退场动画，直接通过 `with_duration` 定制即可。
+
+## 组合动效（Phase 1）
+
+Phase 1 新增三组能力：颜色插值（`BackgroundColor` / `TextColor` / `BorderColor`）、
+多段关键帧（`MotionKeyframes`）与级联入场（`stagger`），可组合出更丰富的入场效果。
+
+### 颜色插值
+
+颜色变体携带一对 `Hsla`（`hsla(h, s, l, a)`，各通道 ∈ [0, 1]），入场时从 `from`
+渐变到 `to`（色相走最短路径，避免绕色环长路导致中间色相偏离直觉）：
+
+```rust
+use gpui_component_motion::{AnimationSpec, Motion, MotionExt};
+use gpui::{div, hsla, px, Styled};
+use std::time::Duration;
+
+// 背景色红 → 蓝，600ms
+div()
+    .w(px(120.))
+    .h(px(80.))
+    .rounded_lg()
+    .with_motion(
+        "color-bg",
+        AnimationSpec::default().with_duration(Duration::from_millis(600)),
+        Motion::BackgroundColor(hsla(0.0, 0.9, 0.5, 1.0), hsla(0.6, 0.9, 0.5, 1.0)),
+    );
+```
+
+`TextColor` / `BorderColor` 用法相同，分别渐变 `text_color` / `border_color`；
+退场时反向（`to → from`）渐变。
+
+### 关键帧动画（Keyframes）
+
+`MotionKeyframes` 将总时长按各段 `ratio` 拆分为多段子动画顺序播放
+（`ratio` 为相对权重，构建时按全部帧归一化；每段至少 1ms，末段吸收舍入余数）：
+
+```rust
+use gpui_component_motion::{Easing, Motion, MotionKeyframes};
+use gpui::{div, px, Styled};
+use std::time::Duration;
+
+// 总时长 600ms：前 50% 淡入，后 50% 上滑 16px
+MotionKeyframes::new(div(), "kf-demo", Duration::from_millis(600))
+    .keyframe(1.0, Easing::EaseOut, Motion::Fade)
+    .keyframe(1.0, Easing::EaseOut, Motion::SlideUp(px(16.0)));
+```
+
+### 级联入场（Stagger）
+
+`stagger` 为一组 `Animated` 元素按索引递增延迟（第 `i` 个延迟 `gap * i`），
+适合列表 / 网格的级联入场；返回的 `Vec<Animated<T>>` 可直接 `.children(...)`
+挂进容器：
+
+```rust
+use gpui_component_motion::{MotionExt, stagger};
+use gpui::{div, Styled};
+use std::time::Duration;
+
+let items = vec![
+    div().fade_in("item-0"),
+    div().fade_in("item-1"),
+    div().fade_in("item-2"),
+];
+// 延迟 0ms / 80ms / 160ms，级联入场
+let staggered = stagger(items, Duration::from_millis(80));
+```
 
 ## 已知限制
 

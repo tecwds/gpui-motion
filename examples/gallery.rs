@@ -6,6 +6,7 @@
 //! - Button / Badge / Tag / Avatar / Icon / Spinner
 //! - Switch / Checkbox / Radio / Slider / Input
 //! - Progress / Tooltip / Notification
+//! - Motion Composition（Phase 1：颜色插值 / Keyframes / Stagger）
 //! - 每个区块容器使用 SlideUp 入场，卡片内部使用 FadeIn 交错入场
 //! - 点击 Replay 重播全部动画；点击右上角按钮切换深/浅色主题
 
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Bounds, Context, ElementId, InteractiveElement, IntoElement, Render, Styled,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    Window, WindowBounds, WindowOptions, div, hsla, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Icon, IconName, Root, Sizable as _, Theme, ThemeMode, WindowExt as _,
@@ -33,7 +34,7 @@ use gpui_component::{
     v_flex,
 };
 use gpui_component_assets::Assets;
-use gpui_component_motion::{AnimationSpec, MotionExt};
+use gpui_component_motion::{AnimationSpec, Easing, Motion, MotionExt, MotionKeyframes, stagger};
 use gpui_platform::application;
 
 struct Gallery {
@@ -536,6 +537,95 @@ impl Gallery {
         self.section_wrapper(cx, "Tooltip & Notification", "gallery-tn-section", 7, cards)
     }
 
+    /// Motion Composition（Phase 1）：颜色插值 / Keyframes / Stagger 组合动效演示。
+    fn render_motion_composition(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let n = self.replay_count;
+
+        // —— 1) 颜色插值（A1）：入场时背景色 / 文字色从 from 渐变到 to（色相走最短路径）——
+        let color_spec = AnimationSpec::default().with_duration(Duration::from_millis(600));
+        let red = hsla(0.0, 0.9, 0.5, 1.0);
+        let blue = hsla(0.6, 0.9, 0.5, 1.0);
+        let mut cards = vec![
+            Self::card(
+                cx,
+                ElementId::named_usize("gallery-mc-color-bg", n),
+                0,
+                div().w(px(120.)).h(px(80.)).rounded_lg().with_motion(
+                    ElementId::named_usize("gallery-mc-color-bg-anim", n),
+                    color_spec,
+                    Motion::BackgroundColor(red, blue),
+                ),
+            ),
+            Self::card(
+                cx,
+                ElementId::named_usize("gallery-mc-color-text", n),
+                60,
+                div().text_xl().child("Text Color").with_motion(
+                    ElementId::named_usize("gallery-mc-color-text-anim", n),
+                    color_spec,
+                    Motion::TextColor(red, blue),
+                ),
+            ),
+        ];
+
+        // —— 2) Keyframes（B4）：两段式动画，前 50% 淡入 + 后 50% 上滑 ——
+        cards.push(Self::card(
+            cx,
+            ElementId::named_usize("gallery-mc-kf-card", n),
+            0,
+            MotionKeyframes::new(
+                div()
+                    .w(px(120.))
+                    .h(px(80.))
+                    .rounded_lg()
+                    .bg(cx.theme().accent),
+                ElementId::named_usize("gallery-mc-kf", n),
+                Duration::from_millis(600),
+            )
+            .keyframe(1.0, Easing::EaseOut, Motion::Fade)
+            .keyframe(1.0, Easing::EaseOut, Motion::SlideUp(px(16.0))),
+        ));
+
+        // —— 3) Stagger（B5）：4 个色块 fade_in 后统一级联，第 i 个延迟 80ms * i ——
+        let staggered = stagger(
+            vec![
+                div()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .rounded_md()
+                    .bg(cx.theme().accent)
+                    .fade_in(ElementId::named_usize("gallery-mc-stagger-0", n)),
+                div()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .rounded_md()
+                    .bg(cx.theme().accent)
+                    .fade_in(ElementId::named_usize("gallery-mc-stagger-1", n)),
+                div()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .rounded_md()
+                    .bg(cx.theme().accent)
+                    .fade_in(ElementId::named_usize("gallery-mc-stagger-2", n)),
+                div()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .rounded_md()
+                    .bg(cx.theme().accent)
+                    .fade_in(ElementId::named_usize("gallery-mc-stagger-3", n)),
+            ],
+            Duration::from_millis(80),
+        );
+        cards.push(Self::card(
+            cx,
+            ElementId::named_usize("gallery-mc-stagger-card", n),
+            0,
+            h_flex().gap_2().children(staggered),
+        ));
+
+        self.section_wrapper(cx, "Motion Composition", "gallery-mc-section", 8, cards)
+    }
+
     /// section 容器：标题 + 卡片网格，整体使用 SlideUp 动画入场。
     fn section_wrapper(
         &self,
@@ -634,7 +724,8 @@ impl Render for Gallery {
             .child(self.render_slider(cx))
             .child(self.render_input(cx))
             .child(self.render_progress_spinner(cx))
-            .child(self.render_tooltip_notification(cx));
+            .child(self.render_tooltip_notification(cx))
+            .child(self.render_motion_composition(cx));
 
         let scroll_area = div()
             .id("gallery-scroll")

@@ -83,15 +83,19 @@
 mod animated;
 mod easing;
 mod ext;
+mod keyframes;
 mod lifecycle;
 mod motion;
 mod presence;
 mod spec;
+mod stagger;
 
 pub use animated::Animated;
 pub use easing::{Easing, SpringPreset};
 pub use ext::MotionExt;
+pub use keyframes::{Keyframe, MotionKeyframes};
 pub use lifecycle::MotionLifecycle;
 pub use motion::Motion;
 pub use presence::PresenceState;
 pub use spec::AnimationSpec;
+pub use stagger::stagger;

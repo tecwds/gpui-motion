@@ -19,7 +19,9 @@ Rust edition: **2024**. Crate name: `gpui-component-motion`.
 | `AnimationSpec` | `src/spec.rs` | Duration + delay + easing + optional Spring; builder methods `with_duration` / `with_delay` / `with_easing` / `with_spring` / `without_spring` |
 | `Easing` | `src/easing.rs` | Traditional curves: `Linear` / `EaseIn` / `EaseOut` / `EaseInOut` (output ∈ [0,1]) |
 | `SpringPreset` | `src/easing.rs` | Spring physics: `Stiff` / `Default` / `Gentle` / `Wobbly` (output can overshoot >1) |
-| `Motion` | `src/motion.rs` | Preset effects: `Fade` / `SlideUp` / `SlideDown` / `SlideLeft` / `SlideRight` / `ExpandWidth` / `ExpandHeight` |
+| `Motion` | `src/motion.rs` | Preset effects: `Fade` / `SlideUp` / `SlideDown` / `SlideLeft` / `SlideRight` / `ExpandWidth` / `ExpandHeight`; Phase 1 adds color interpolation variants `BackgroundColor(from, to)` / `TextColor(from, to)` / `BorderColor(from, to)` (Hsla pairs; entry eases from → to, exit to → from, hue takes the shortest path) |
+| `MotionKeyframes<T>` + `Keyframe` | `src/keyframes.rs` | Multi-segment keyframe wrapper (Phase 1 / B4): splits total duration across segments by each `Keyframe`'s relative `ratio` (normalized at build time); builder `keyframe(ratio, easing, motion)`; implements `IntoElement` + `ParentElement`; empty frames fall back to a single Fade |
+| `stagger` | `src/stagger.rs` | Free function (Phase 1 / B5): `stagger(Vec<Animated<T>>, gap)` → `Vec<Animated<T>>`, replaces element *i*'s delay with `gap * i` for cascading entry (duration / easing / spring preserved) |
 | `MotionLifecycle` | `src/lifecycle.rs` | Enter + exit animation pairing; presets: `fade` / `slide_*` / `expand_width` / `expand_height` |
 | `PresenceState` | `src/presence.rs` | Declarative presence container (state machine HIDDEN→ENTERING→VISIBLE→EXITING); auto-manages enter/exit timing and unmount |
 
@@ -149,6 +151,60 @@ div().fade_in("panel").child(div().child("panel content"));
 | `SlideRight(off)` | left: -off→0 | left: 0→-off | Slide in from left (left panel) |
 | `ExpandWidth(max)` | width: 0→max | width: max→0 | Horizontal panel expand/collapse |
 | `ExpandHeight(max)` | height: 0→max | height: max→0 | Vertical collapse (dropdown/accordion) |
+| `BackgroundColor(from, to)` | bg from→to | bg to→from | Accent color gradient, state coloring |
+| `TextColor(from, to)` | text from→to | text to→from | Text highlight, state text color |
+| `BorderColor(from, to)` | border from→to | border to→from | Selection / validation border highlight |
+
+### 6. Phase 1: composition (color / keyframes / stagger)
+
+Three Phase 1 capabilities compose with everything above. Colors use `MotionExt::with_motion`; keyframes and stagger are new standalone APIs.
+
+**Color interpolation** — color variants take a `(from, to)` `Hsla` pair; the element's color eases from `from` to `to` during entry (hue walks the shortest path):
+
+```rust
+use gpui_component_motion::{AnimationSpec, Motion, MotionExt};
+use gpui::{div, hsla, px, Styled};
+use std::time::Duration;
+
+// bg red → blue over 600ms
+div().with_motion(
+    "color-bg",
+    AnimationSpec::default().with_duration(Duration::from_millis(600)),
+    Motion::BackgroundColor(hsla(0.0, 0.9, 0.5, 1.0), hsla(0.6, 0.9, 0.5, 1.0)),
+);
+```
+
+`TextColor` / `BorderColor` behave identically for `text_color` / `border_color`.
+
+**Keyframes** — `MotionKeyframes` splits the total duration across segments by relative `ratio` weight (normalized at build time; each segment ≥ 1ms, the last segment absorbs rounding). Each segment's `Motion` completes its own from→to within the segment:
+
+```rust
+use gpui_component_motion::{Easing, Motion, MotionKeyframes};
+use gpui::{div, px, Styled};
+use std::time::Duration;
+
+// 600ms total: first half fades in, second half slides up 16px
+MotionKeyframes::new(div(), "kf", Duration::from_millis(600))
+    .keyframe(1.0, Easing::EaseOut, Motion::Fade)
+    .keyframe(1.0, Easing::EaseOut, Motion::SlideUp(px(16.0)));
+```
+
+**Stagger** — free function that replaces element *i*'s delay with `gap * i` (delay 0 / gap / 2*gap / …; duration / easing / spring preserved):
+
+```rust
+use gpui_component_motion::{MotionExt, stagger};
+use gpui::{div, Styled};
+use std::time::Duration;
+
+let items = vec![
+    div().fade_in("item-0"),
+    div().fade_in("item-1"),
+    div().fade_in("item-2"),
+];
+let staggered = stagger(items, Duration::from_millis(80)); // 0 / 80 / 160ms
+```
+
+> **Unique ids per item (E3)**: each staggered item is a sibling, so every item needs its own `ElementId`. Use a stable base name per item (e.g. `ElementId::named_usize("item-0", n)`) with the replay counter — never `format!` in render.
 
 ## Critical Constraints
 
